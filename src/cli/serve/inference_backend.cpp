@@ -40,6 +40,7 @@
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/host_allocations.hpp"
+#include "src/core/platform/device_memory.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
@@ -1138,7 +1139,8 @@ public:
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
+        hipSuccess) {
       capacity = free_bytes;
     }
     // Snapshot buffers are device allocations, but on a unified-memory APU
@@ -1664,7 +1666,8 @@ public:
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
+        hipSuccess) {
       capacity = free_bytes;
     }
     return {
@@ -2453,7 +2456,8 @@ public:
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
+        hipSuccess) {
       const auto deferred = model_->DeferredScratchBytes();
       capacity = free_bytes > deferred ? free_bytes - deferred : 0;
     }

@@ -16,6 +16,7 @@
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/socket.hpp"
 
 namespace {
 using namespace gufo::server;
@@ -28,9 +29,8 @@ public:
          std::string_view authorization = "Bearer test") {
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
-    const timeval timeout{3, 0};
-    assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                        sizeof(timeout)) == 0);
+    assert(gufo::platform::SetSocketTimeout(fd, SO_RCVTIMEO,
+                                            std::chrono::seconds{3}) == 0);
     sockaddr_in address{.sin_family = AF_INET, .sin_port = htons(port)};
     assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address),
@@ -49,7 +49,7 @@ public:
   }
   ~Client() {
     ::shutdown(fd, SHUT_RDWR);
-    ::close(fd);
+    gufo::platform::CloseSocket(fd);
   }
   void Send(std::string_view bytes) {
     while (!bytes.empty()) {

@@ -100,8 +100,17 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   // Direct I/O bypasses the page cache; the mapping used for the rest of the
   // model must not be used here or every touched row would stay resident.
   const auto path = "/proc/self/fd/" + std::to_string(file_descriptor);
+#ifdef _WIN32
+  // NTFS serializes direct reads of a file that is also mapped (the rest of
+  // the model is): 32 readers got ~5K rows/s. Cached overlapped reads keep
+  // ~70K/s at 32 readers and ~128K/s at 128; the pages go to the standby
+  // list, which Windows reclaims first, not to this process.
+  t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_CONCURRENT_RANDOM);
+  t->direct_ = false;
+#else
   t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
   t->direct_ = t->fd_ >= 0;
+#endif
   if (t->fd_ < 0) {
     t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   }

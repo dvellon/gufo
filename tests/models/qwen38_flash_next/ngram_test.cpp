@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace q = gufo::models::qwen38_flash_next;
@@ -371,7 +372,10 @@ void TestDistantRows() {
 }
 
 void TestReplacedPath() {
-  char name[] = "/tmp/qwen-ngram-bound-XXXXXX";
+  std::string name_storage =
+      (std::filesystem::temp_directory_path() / "qwen-ngram-bound-XXXXXX")
+          .string();
+  char* name = name_storage.data();
   const int fd = ::mkstemp(name);
   Check(fd >= 0, "create bound table");
   if (fd < 0)

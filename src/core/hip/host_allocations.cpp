@@ -1,9 +1,11 @@
 #include "src/core/hip/host_allocations.hpp"
 
+#ifndef _WIN32
 #include <linux/io_uring.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <new>
@@ -11,6 +13,14 @@
 namespace gufo::hip {
 
 int PinHostPages(void* data, std::size_t bytes) noexcept {
+#ifdef _WIN32
+  // hipHostMalloc already owns the page-locking contract on Windows. Linux's
+  // extra io_uring registration has no Win32 equivalent and is only a
+  // best-effort defence against kernel compaction, so report no extra pin.
+  (void)data;
+  (void)bytes;
+  return -1;
+#else
   if (!data || !bytes)
     return -1;
   // Bound each kernel pinning range so request-side CPU page faults can
@@ -35,14 +45,19 @@ int PinHostPages(void* data, std::size_t bytes) noexcept {
     return ring;
   close(ring);
   return -1;
+#endif
 }
 
 void UnpinHostPages(int ring) noexcept {
+#ifdef _WIN32
+  (void)ring;
+#else
   if (ring >= 0) {
     (void)syscall(SYS_io_uring_register, ring, IORING_UNREGISTER_BUFFERS,
                   nullptr, 0);
     close(ring);
   }
+#endif
 }
 
 HostAllocations::~HostAllocations() {

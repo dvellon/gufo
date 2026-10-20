@@ -105,7 +105,7 @@ std::optional<HostCpuInfo> LinuxSysfs::QueryCpuInfo() const {
   const auto content_opt = ReadFile(proc_root_ / "cpuinfo");
   if (!content_opt) {
 #ifdef _WIN32
-    if (proc_root_ == "/proc")
+    if (proc_root_ == std::filesystem::absolute("/proc"))
       return WindowsCpuInfo();
 #endif
     return std::nullopt;
@@ -156,7 +156,7 @@ std::optional<HostMemInfo> LinuxSysfs::QueryMemInfo() const {
   const auto content_opt = ReadFile(proc_root_ / "meminfo");
   if (!content_opt) {
 #ifdef _WIN32
-    if (proc_root_ == "/proc") {
+    if (proc_root_ == std::filesystem::absolute("/proc")) {
       HostMemInfo windows;
       windows.total_bytes = gufo_total_physical_bytes();
       windows.available_bytes = gufo_available_physical_bytes();

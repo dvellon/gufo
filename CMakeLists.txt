@@ -743,6 +743,15 @@ if (BUILD_TESTING)
   add_test(NAME gpu_queues_test COMMAND gpu_queues_test)
   set_tests_properties(gpu_queues_test PROPERTIES LABELS "cpu;diagnostics;serving")
 
+  if (WIN32)
+    add_executable(windows_inventory_test
+      tests/diagnostics/windows_inventory_test.cpp)
+    target_link_libraries(windows_inventory_test PRIVATE gufo_diagnostics)
+    add_test(NAME windows_inventory_test COMMAND windows_inventory_test)
+    set_tests_properties(windows_inventory_test PROPERTIES
+      LABELS "cpu;diagnostics;windows")
+  endif()
+
   add_executable(bandwidth_test tests/diagnostics/bandwidth_test.cpp)
   target_compile_definitions(bandwidth_test PRIVATE TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
   target_link_libraries(bandwidth_test PRIVATE gufo_diagnostics)

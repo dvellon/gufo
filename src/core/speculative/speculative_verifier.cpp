@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -284,6 +285,7 @@ SpeculativeVerifier::SpeculativeVerifier(
 
 void SpeculativeVerifier::Reset() noexcept {
   stats_ = {};
+  timing_stats_ = {};
   ResetAdaptiveDraftLength();
   if (draft_backend_ != nullptr) {
     draft_backend_->Reset();
@@ -292,6 +294,7 @@ void SpeculativeVerifier::Reset() noexcept {
 
 void SpeculativeVerifier::BeginRequest() noexcept {
   stats_ = {};
+  timing_stats_ = {};
   ResetAdaptiveDraftLength();
   if (draft_backend_ != nullptr)
     draft_backend_->BeginRequest();
@@ -432,11 +435,24 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
                                eos_id, max_emitted_tokens, sampler});
   if (prepared.immediate.has_value())
     return std::move(*prepared.immediate);
+  const auto target_started = std::chrono::steady_clock::now();
   auto verification = target_executor_->ForwardVerificationChunk(
       prepared.inputs, prepared.position, prepared.capture_hidden,
       prepared.capture_logits);
-  auto result =
-      ProcessVerificationChunk(prepared, std::move(verification), sampler);
+  timing_stats_.target_verification_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - target_started)
+              .count());
+  ++timing_stats_.target_calls;
+  const auto feedback_started = std::chrono::steady_clock::now();
+  auto result = ProcessVerificationChunk(prepared, std::move(verification),
+                                         sampler);
+  timing_stats_.feedback_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - feedback_started)
+              .count());
   if (!result.has_value())
     throw std::logic_error("complete verification still requires target rows");
   return std::move(*result);
@@ -474,6 +490,7 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
     return prepared;
   auto& working_sampler =
       prepared.sampled ? *prepared.working_sampler : request.sampler;
+  const auto draft_started = std::chrono::steady_clock::now();
   prepared.proposal =
       prepared.random_sampling
           ? draft_backend_->ProposeSampled(request.sequence, request.position,
@@ -482,6 +499,12 @@ SpeculativeVerifier::PreparedStep SpeculativeVerifier::PrepareStep(
                                            working_sampler.mutable_rng_state())
           : draft_backend_->Propose(request.sequence, request.position,
                                     prepared.max_draft_tokens);
+  timing_stats_.draft_proposal_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - draft_started)
+              .count());
+  ++timing_stats_.draft_calls;
   PrepareProposalVerification(prepared, request, defer_target_only);
   return prepared;
 }
@@ -980,8 +1003,16 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
   // 1. Propose draft tokens
   std::optional<speculative::DraftProposal> proposal_holder;
   {
+    const auto started = std::chrono::steady_clock::now();
     proposal_holder =
         draft_backend_->Propose(current_sequence, cur_pos, max_draft_tokens);
+    timing_stats_.draft_proposal_nanoseconds +=
+        static_cast<std::uint64_t>(std::chrono::duration_cast<
+                                       std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() -
+                                       started)
+                                       .count());
+    ++timing_stats_.draft_calls;
   }
   const auto proposal = std::move(*proposal_holder);
   if (proposal.tokens.empty()) {
@@ -1031,6 +1062,7 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
     destination.insert(destination.end(), hidden.begin(), hidden.end());
   };
 
+  const auto target_started = std::chrono::steady_clock::now();
   target_executor_->SaveState(cur_pos);
   std::vector<tokenization::TokenId> target_predictions;
   target_predictions.reserve(num_draft);
@@ -1084,6 +1116,14 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
     append_target_hidden(committed_target_hidden);
   }
 
+  timing_stats_.target_verification_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - target_started)
+              .count());
+  ++timing_stats_.target_calls;
+
+  const auto feedback_started = std::chrono::steady_clock::now();
   if (capture_target_hidden) {
     if (target_hidden_width == 0 ||
         committed_target_hidden.size() % target_hidden_width != 0) {
@@ -1132,6 +1172,12 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifySequentialStep(
   draft_backend_->AcceptFeedback(std::span<const tokenization::TokenId>(
                                      proposal.tokens.data(), accepted_count),
                                  correction_token);
+
+  timing_stats_.feedback_nanoseconds +=
+      static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - feedback_started)
+              .count());
 
   return result;
 }

@@ -47,6 +47,17 @@ struct SpeculativeStats {
   }
 };
 
+// Request-local wall time for single-request speculative verification. Shared
+// multi-request batch execution is excluded. These counters are diagnostic
+// only and are deliberately excluded from session snapshots.
+struct SpeculativeTimingStats {
+  std::uint64_t draft_proposal_nanoseconds{0};
+  std::uint64_t target_verification_nanoseconds{0};
+  std::uint64_t feedback_nanoseconds{0};
+  std::size_t draft_calls{0};
+  std::size_t target_calls{0};
+};
+
 #if defined(ENGINE_ENABLE_HIP)
 
 struct VerificationChunkResult {
@@ -356,6 +367,10 @@ public:
     return stats_;
   }
 
+  [[nodiscard]] const SpeculativeTimingStats& GetTimingStats() const noexcept {
+    return timing_stats_;
+  }
+
   [[nodiscard]] std::uint32_t GetCurrentDraftLength() const noexcept {
     return current_draft_length_;
   }
@@ -392,6 +407,7 @@ private:
   IDraftBackend* draft_backend_;
   SpeculativeOptions options_;
   SpeculativeStats stats_;
+  SpeculativeTimingStats timing_stats_;
   std::uint32_t current_draft_length_{3};
   std::deque<float> rolling_acceptance_;
   bool use_batched_verification_{false};

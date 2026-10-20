@@ -3,12 +3,12 @@
 #
 #   powershell -ExecutionPolicy Bypass -File tools\windows\check.ps1
 param(
-  [string]$Rocm = "C:\TheRock\build",
+  [string]$Rocm = "",
   [string]$Vcpkg = "C:\vcpkg",
   [string]$Ninja = "C:\tools\ninja\ninja.exe"
 )
-$validatedRock = "10.0.0"
-$tarball = "therock-dist-windows-gfx1151-$validatedRock.tar.gz"
+$validatedRock = "10.1.0"
+$validatedDriver = [version]"32.0.31041.5005"
 $failures = 0
 
 function Report([string]$name, [bool]$ok, [string]$detail, [string]$fix = "") {
@@ -26,12 +26,19 @@ function Note([string]$name, [string]$detail) {
 
 Write-Host "Gufo Windows prerequisites"
 
+# Prefer the official ROCm wheel environment when it is active, while keeping
+# the extracted TheRock layout available for existing installations.
+if (-not $Rocm) {
+  $rocmSdk = Get-Command rocm-sdk -ErrorAction SilentlyContinue
+  $Rocm = if ($rocmSdk) { (& $rocmSdk.Source path --root).Trim() } else { "C:\TheRock\build" }
+}
+
 # Operating system.
 $os = Get-CimInstance Win32_OperatingSystem
 Report "Windows x64" ($os.OSArchitecture -match "64" -and [int]$os.BuildNumber -ge 22000) `
   "$($os.Caption) build $($os.BuildNumber)" "Windows 11 x64 is required"
 
-# TheRock ROCm.
+# TheRock ROCm (official wheel or extracted distribution).
 $versionFile = Join-Path $Rocm ".info\version"
 if (Test-Path $versionFile) {
   $version = (Get-Content $versionFile -TotalCount 1).Trim()
@@ -40,10 +47,10 @@ if (Test-Path $versionFile) {
     Note "TheRock version" "validated on $validatedRock; other releases may round kernels differently"
   }
   Report "TheRock clang" (Test-Path "$Rocm\lib\llvm\bin\clang++.exe") "$Rocm\lib\llvm\bin\clang++.exe" `
-    "re-extract $tarball"
+    "run 'rocm-sdk init' in the ROCm wheel environment"
 } else {
   Report "TheRock ROCm" $false "not found at $Rocm" `
-    "extract https://stable.repo.amd.com/rocm/core/tarball/$tarball to $Rocm"
+    "install rocm[devel,libraries,device-gfx1151]==$validatedRock from https://stable.repo.amd.com/rocm/whl-next/ and run 'rocm-sdk init'"
 }
 
 # Visual Studio C++ build tools (headers, libraries, linker environment).
@@ -58,7 +65,8 @@ Report "VS C++ build tools" ([bool]$vs) ($(if ($vs) { $vs } else { "not found" }
 $cmake = Get-Command cmake -ErrorAction SilentlyContinue
 if ($cmake) {
   $cmakeVersion = [version]((& cmake --version | Select-Object -First 1) -replace "[^0-9.]", "")
-  Report "CMake" ($cmakeVersion -ge [version]"3.21") "$cmakeVersion" "install CMake 3.21 or newer"
+  Report "CMake" ($cmakeVersion -ge [version]"3.21" -and $cmakeVersion -lt [version]"4.0") "$cmakeVersion" `
+    "install CMake 3.21 through 3.31 (3.31.6 is validated; CMake 4.x mis-escapes this Windows HIP toolchain)"
 } else {
   Report "CMake" $false "not on PATH" "install CMake 3.21 or newer and add it to PATH"
 }
@@ -82,6 +90,9 @@ if (Test-Path "$Vcpkg\vcpkg.exe") {
 $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "Radeon" } | Select-Object -First 1
 if ($gpu) {
   Report "AMD GPU" $true "$($gpu.Name), driver $($gpu.DriverVersion)"
+  $driverVersion = [version]$gpu.DriverVersion
+  Report "ROCm display driver" ($driverVersion -ge $validatedDriver) "$driverVersion" `
+    "install AMD Software: Adrenalin Edition for ROCm 10.1 (driver-store $validatedDriver or newer)"
   # The registry holds the 64-bit dedicated size (AdapterRAM caps at 4 GB).
   $dedicated = $null
   Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" -ErrorAction SilentlyContinue |

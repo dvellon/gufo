@@ -103,16 +103,16 @@ std::vector<BandwidthPathResult> MeasureHipBandwidth(
     for (std::uint32_t w = 0; w < options.warmup; ++w) {
       hipMemcpy(d_src, h_src.data(), size, hipMemcpyHostToDevice);
     }
+    hipDeviceSynchronize();
 
     for (detail::BandwidthRun run(options, path); run.ShouldContinue();) {
-      hipEventRecord(start_event, nullptr);
+      const auto started = std::chrono::steady_clock::now();
       hipMemcpy(d_src, h_src.data(), size, hipMemcpyHostToDevice);
-      hipEventRecord(stop_event, nullptr);
-      hipEventSynchronize(stop_event);
-
-      float elapsed_ms = 0.0F;
-      hipEventElapsedTime(&elapsed_ms, start_event, stop_event);
-      const double elapsed_sec = static_cast<double>(elapsed_ms) / 1000.0;
+      hipDeviceSynchronize();
+      const double elapsed_sec =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        started)
+              .count();
       run.Record(elapsed_sec, static_cast<double>(size));
     }
 
@@ -164,18 +164,18 @@ std::vector<BandwidthPathResult> MeasureHipBandwidth(
     for (std::uint32_t w = 0; w < options.warmup; ++w) {
       hipMemcpy(h_dst.data(), d_dst, size, hipMemcpyDeviceToHost);
     }
+    hipDeviceSynchronize();
 
     bool sentinel_ok = true;
     for (detail::BandwidthRun run(options, path); run.ShouldContinue();) {
       std::fill(h_dst.begin(), h_dst.end(), 0);
-      hipEventRecord(start_event, nullptr);
+      const auto started = std::chrono::steady_clock::now();
       hipMemcpy(h_dst.data(), d_dst, size, hipMemcpyDeviceToHost);
-      hipEventRecord(stop_event, nullptr);
-      hipEventSynchronize(stop_event);
-
-      float elapsed_ms = 0.0F;
-      hipEventElapsedTime(&elapsed_ms, start_event, stop_event);
-      const double elapsed_sec = static_cast<double>(elapsed_ms) / 1000.0;
+      hipDeviceSynchronize();
+      const double elapsed_sec =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        started)
+              .count();
       run.Record(elapsed_sec, static_cast<double>(size));
 
       if (h_dst[0] != h_src[0] || h_dst[size / 2] != h_src[size / 2] ||

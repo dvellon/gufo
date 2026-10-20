@@ -9,14 +9,25 @@ builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 
 | Piece | Default location | Notes |
 | --- | --- | --- |
-| TheRock ROCm 10.0.0 (Windows, gfx1151) | `C:\TheRock\build` | [`therock-dist-windows-gfx1151-10.0.0.tar.gz`](https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz), SHA-256 `1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38`; extract so that `C:\TheRock\build\bin` exists. Its clang compiles C, C++ and HIP |
+| TheRock ROCm 10.1.0 (Windows, gfx1151) | active Python environment | Install AMD's official `rocm[devel,libraries,device-gfx1151]==10.1.0` wheels and run `rocm-sdk init`; `rocm-sdk path --root` locates the toolchain. Its clang compiles C, C++ and HIP |
+| AMD display driver | system | Adrenalin for ROCm 10.1, driver-store `32.0.31041.5005` or newer. Older 31041 drivers can crash in `hipProfilerRegisterChunkCallbackExt` before the first kernel runs |
 | vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo libwebp pkgconf --triplet x64-windows` |
 | Visual Studio Build Tools | any | "Desktop development with C++": MSVC STL + Windows SDK only; tested with VS 18 (MSVC 14.51) |
-| CMake 3.21+ and Ninja | `PATH`, or Ninja at `C:\tools\ninja` | |
+| CMake 3.21-3.31 and Ninja | active Python environment or `PATH` | 3.31.6 is validated; CMake 4.x currently mis-escapes the wheel toolchain's Windows paths |
 | Dedicated GPU memory | AMD Software > Performance > Tuning > Variable Graphics Memory | 96 GB for Qwen3.8-Flash-Next at 256K context; see [Memory](#memory) |
 
-The port is validated on TheRock 10.0.0. Other releases usually build, but a
+The port is validated on TheRock 10.1.0. Other releases usually build, but a
 newer clang can round fused kernels differently (see [Test status](#test-status)).
+
+One isolated setup is:
+
+```powershell
+py -3.12 -m venv C:\rocm-10.1
+C:\rocm-10.1\Scripts\python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ `
+  "rocm[devel,libraries,device-gfx1151]==10.1.0" "cmake==3.31.6" "ninja==1.13.2"
+C:\rocm-10.1\Scripts\rocm-sdk init
+C:\rocm-10.1\Scripts\Activate.ps1
+```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\check.ps1   # what is missing, and how to fix it
@@ -24,8 +35,9 @@ powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1   # release -> 
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test   # + tests and tools
 ```
 
-`build.ps1` imports the MSVC environment, configures with TheRock clang and the
-vcpkg toolchain, builds, and copies the ROCm and vcpkg runtime DLLs plus the
+`build.ps1` imports the MSVC environment, discovers the active wheel toolchain
+(or accepts `-Rocm`), configures with TheRock clang and the vcpkg toolchain,
+builds, and copies the ROCm and vcpkg runtime DLLs plus the
 hipBLASLt/rocBLAS kernel libraries next to `gufo.exe`, so `build\release` runs
 as it is.
 

@@ -16,6 +16,8 @@ typedef long long off_t;
 #define GUFO_PID_T_DEFINED
 typedef int pid_t;
 #endif
+typedef unsigned long long dev_t;
+typedef unsigned long long ino_t;
 typedef unsigned int mode_t;
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;

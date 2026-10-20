@@ -2,9 +2,8 @@
 #
 # Prerequisites (paths overridable by parameter; tools\windows\check.ps1
 # checks them all):
-#   - TheRock 10.0.0 for Windows gfx1151, extracted to C:\TheRock\build:
-#     https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz
-#     (SHA-256 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38)
+#   - ROCm 10.1.0 for Windows gfx1151 from AMD's official Python wheels;
+#     activate that environment and run `rocm-sdk init` once.
 #   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo
 #     libwebp pkgconf (x64-windows)
 #   - Visual Studio Build Tools (MSVC STL + Windows SDK; the compiler is TheRock clang)
@@ -15,7 +14,7 @@
 param(
   [string]$Preset = "release",
   [string]$Target = "",
-  [string]$Rocm = "C:\TheRock\build",
+  [string]$Rocm = "",
   [string]$Vcpkg = "C:\vcpkg",
   [string]$Ninja = "C:\tools\ninja\ninja.exe",
   [int]$Jobs = 0,
@@ -26,9 +25,14 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 
+if (-not $Rocm) {
+  $rocmSdk = Get-Command rocm-sdk -ErrorAction SilentlyContinue
+  $Rocm = if ($rocmSdk) { (& $rocmSdk.Source path --root).Trim() } else { "C:\TheRock\build" }
+}
+
 # The port is validated on one TheRock release; a newer clang can round the
 # fused kernels differently (see docs\WINDOWS.md).
-$validatedRock = "10.0.0"
+$validatedRock = "10.1.0"
 $rockVersionFile = Join-Path $Rocm ".info\version"
 if (-not (Test-Path $rockVersionFile)) {
   throw "TheRock not found at $Rocm (see docs\WINDOWS.md, or run tools\windows\check.ps1)"
@@ -64,6 +68,8 @@ if (-not (Test-Path "$build\CMakeCache.txt")) {
     "-DCMAKE_C_COMPILER=$clang" `
     "-DCMAKE_CXX_COMPILER=$clangxx" `
     "-DCMAKE_HIP_COMPILER=$clangxx" `
+    "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$($Rocm.Replace('\', '/'))" `
+    "-DCMAKE_HIP_FLAGS=--rocm-device-lib-path=$($env:HIP_DEVICE_LIB_PATH)" `
     "-DCMAKE_TOOLCHAIN_FILE=$($Vcpkg.Replace('\', '/'))/scripts/buildsystems/vcpkg.cmake" `
     "-DVCPKG_TARGET_TRIPLET=x64-windows" `
     "-DCMAKE_PREFIX_PATH=$($Rocm.Replace('\', '/'))" `
@@ -81,15 +87,26 @@ if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 # Runtime DLLs next to gufo.exe: ROCm (amdhip64, hipblas, hipblaslt, rocblas
 # and their kernel libraries) and vcpkg's (icu, curl, ssl, png, jpeg, zlib).
+# The 10.1 wheel splits runtime DLLs between sibling core, libraries and devel
+# packages, while extracted TheRock distributions keep them under one root.
 $bin = $build
-$rocmDlls = @("amdhip64_7.dll", "amd_comgr*.dll", "hipblas.dll", "libhipblaslt.dll", "origami.dll", "rocblas.dll", "rocsolver.dll", "rocsparse.dll", "rocm_kpack.dll", "rocm-openblas*.dll", "hiprtc*.dll")
-foreach ($pattern in $rocmDlls) {
-  Get-ChildItem "$Rocm\bin\$pattern" -ErrorAction SilentlyContinue | Copy-Item -Destination $bin -Force
+$rocmRoots = @($Rocm)
+if ((Split-Path $Rocm -Leaf) -eq "_rocm_sdk_devel") {
+  $packageRoot = Split-Path $Rocm -Parent
+  $rocmRoots += @("_rocm_sdk_core", "_rocm_sdk_libraries") |
+    ForEach-Object { Join-Path $packageRoot $_ } |
+    Where-Object { Test-Path $_ }
 }
-foreach ($dir in @("hipblaslt", "rocblas")) {
-  $libraryDir = Join-Path "$Rocm\bin" $dir
-  if (Test-Path $libraryDir) {
-    Copy-Item $libraryDir -Destination $bin -Recurse -Force
+$runtimeBins = $rocmRoots | ForEach-Object {
+  @((Join-Path $_ "bin"), (Join-Path $_ "lib\rocm_sysdeps\bin"))
+} | Where-Object { Test-Path $_ } | Select-Object -Unique
+foreach ($runtimeBin in $runtimeBins) {
+  Get-ChildItem "$runtimeBin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $bin -Force
+  foreach ($dir in @("hipblaslt", "rocblas")) {
+    $libraryDir = Join-Path $runtimeBin $dir
+    if (Test-Path $libraryDir) {
+      Copy-Item $libraryDir -Destination $bin -Recurse -Force
+    }
   }
 }
 Get-ChildItem "$Vcpkg\installed\x64-windows\bin\*.dll" | Copy-Item -Destination $bin -Force

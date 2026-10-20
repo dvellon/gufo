@@ -250,14 +250,23 @@ std::string MachineFingerprint::ToHuman() const {
   std::ostringstream oss;
   oss << "=== Machine Fingerprint ===\n";
   oss << "Fingerprint ID      : " << fingerprint_id << "\n";
+#ifdef _WIN32
+  oss << "Target Platform     : " << canonical.cpu_architecture
+      << "-windows (Windows " << canonical.kernel_release << ")\n";
+#else
   oss << "Target Platform     : " << canonical.cpu_architecture
       << "-linux (Linux " << canonical.kernel_release << ")\n";
+#endif
   oss << "CPU Model           : " << canonical.cpu_model << " ("
       << canonical.cpu_logical_cores << " threads)\n";
   oss << "GPU Architecture    : " << canonical.gpu_name << " ["
       << canonical.gpu_architecture << ", " << canonical.gpu_compute_units
       << " CUs]\n";
+#ifdef _WIN32
+  oss << "Loaded Runtime      : HIP " << canonical.rocm_version << "\n";
+#else
   oss << "Pinned Toolchain    : ROCm " << canonical.rocm_version << "\n";
+#endif
   return oss.str();
 }
 

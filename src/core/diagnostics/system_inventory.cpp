@@ -35,6 +35,22 @@ std::string EscapeJsonStr(std::string_view str) {
 SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
   SystemInventory inv;
 
+#ifdef _WIN32
+  inv.cpu.source = "CPUID + Win32";
+  inv.memory.source = "GlobalMemoryStatusEx";
+  inv.gpu.source = "HIP runtime";
+  inv.gpu.driver_name = "HIP";
+  inv.gpu.pci_id = "unavailable via HIP";
+  inv.gpu.power_mode = "managed by Windows display driver";
+  inv.toolchain.amdgpu_status = "not applicable (Windows HIP runtime)";
+  inv.toolchain.source = "HIP runtime + Win32";
+#if defined(__clang__)
+  inv.toolchain.cxx_compiler = "Clang " __clang_version__;
+#elif defined(_MSC_VER)
+  inv.toolchain.cxx_compiler = "MSVC " + std::to_string(_MSC_VER);
+#endif
+#endif
+
   // 1. CPU
   if (const auto cpu_opt = sysfs.QueryCpuInfo()) {
     inv.cpu.model_name = cpu_opt->model_name;
@@ -55,7 +71,7 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.memory.is_unified = mem_opt->is_unified_memory;
   }
 
-  // 3. Linux Kernel & Driver Inventory
+  // 3. Host OS and driver inventory
   if (const auto uname_opt = sysfs.QueryUname()) {
     inv.toolchain.kernel_release = uname_opt->release;
   } else {
@@ -220,8 +236,13 @@ std::string SystemInventory::ToHuman() const {
       << memory.memory_type << ")\n";
   oss << "GPU Model           : " << gpu.name << " [" << gpu.architecture
       << ", " << gpu.compute_units << " CUs] (" << gpu.availability << ")\n";
+#ifdef _WIN32
+  oss << "Windows Version     : " << toolchain.kernel_release << "\n";
+  oss << "HIP Runtime         : " << toolchain.rocm_version << "\n";
+#else
   oss << "Linux Kernel        : " << toolchain.kernel_release << "\n";
   oss << "ROCm Version        : " << toolchain.rocm_version << "\n";
+#endif
 
   return oss.str();
 }

@@ -118,8 +118,13 @@ diagnostics::DiagnosticReport CollectDiagnostics(
 #endif
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
+#ifdef _WIN32
+      check.message =
+          "Unsupported target platform: only Windows x86-64 is supported";
+#else
       check.message =
           "Unsupported target platform: only Linux x86-64 is supported";
+#endif
       report.AddError("Unsupported platform architecture detected");
     }
     report.AddCheck(std::move(check));
@@ -189,8 +194,13 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     check.status = diagnostics::DiagnosticStatus::kPass;
     check.message = "Toolchain and driver stack verified";
     check.details["kernelRelease"] = inventory.toolchain.kernel_release;
+#ifdef _WIN32
+    check.details["driverStatus"] = inventory.gpu.driver_name;
+    check.details["hipRuntimeVersion"] = inventory.toolchain.rocm_version;
+#else
     check.details["amdgpuStatus"] = inventory.toolchain.amdgpu_status;
     check.details["rocmVersion"] = inventory.toolchain.rocm_version;
+#endif
     report.AddCheck(std::move(check));
   }
 

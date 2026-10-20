@@ -30,10 +30,12 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <psapi.h>
+#include <bcrypt.h>
 #include <winternl.h>
 
 #include <crtdbg.h>
 #include <direct.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
@@ -51,15 +53,25 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
 #include <mutex>
+#include <new>
 #include <random>
 #include <string>
 #include <typeinfo>
 #include <unordered_map>
 
 #include "gufo_socket.h"
+
+struct gufo_DIR {
+  int fd = -1;
+  HANDLE search = INVALID_HANDLE_VALUE;
+  WIN32_FIND_DATAW found{};
+  bool started = false;
+  struct dirent entry{};
+};
 
 namespace {
 
@@ -466,7 +478,17 @@ std::wstring DirectoryPathOf(int dirfd) {
   if (n == 0 || n >= 32768) {
     return {};
   }
-  return std::wstring(buffer, n);
+  std::wstring path(buffer, n);
+  // GetFinalPathNameByHandle returns an extended path. The \\?\ namespace
+  // deliberately disables Win32's `.` and `..` normalization, while openat
+  // callers rely on those components retaining their POSIX meaning.
+  constexpr wchar_t extended_unc[] = L"\\\\?\\UNC\\";
+  constexpr wchar_t extended[] = L"\\\\?\\";
+  if (path.starts_with(extended_unc))
+    return L"\\\\" + path.substr(std::size(extended_unc) - 1);
+  if (path.starts_with(extended))
+    return path.substr(std::size(extended) - 1);
+  return path;
 }
 
 std::wstring ResolveAt(int dirfd, const char* path) {
@@ -704,6 +726,112 @@ int openat(int dirfd, const char* path, int flags, ...) {
     return -1;
   }
   return OpenPath(resolved, flags, mode);
+}
+
+int mkdirat(int dirfd, const char* path, mode_t) {
+  const std::wstring resolved = ResolveAt(dirfd, path);
+  if (resolved.empty()) {
+    errno = EBADF;
+    return -1;
+  }
+  if (!CreateDirectoryW(resolved.c_str(), nullptr)) {
+    return Fail(GetLastError());
+  }
+  return 0;
+}
+
+ssize_t getrandom(void* buffer, size_t length, unsigned int flags) {
+  if ((buffer == nullptr && length != 0) || flags != 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  auto* bytes = static_cast<unsigned char*>(buffer);
+  size_t offset = 0;
+  while (offset < length) {
+    const ULONG chunk = static_cast<ULONG>(
+        (std::min)(length - offset, static_cast<size_t>(ULONG_MAX)));
+    if (BCryptGenRandom(nullptr, bytes + offset, chunk,
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+      errno = EIO;
+      return -1;
+    }
+    offset += chunk;
+  }
+  return static_cast<ssize_t>(length);
+}
+
+DIR* fdopendir(int fd) {
+  const std::wstring path = DirectoryPathOf(fd);
+  if (path.empty() || !IsDirectoryHandle(HandleOf(fd))) {
+    errno = EBADF;
+    return nullptr;
+  }
+  auto* directory = new (std::nothrow) gufo_DIR;
+  if (!directory) {
+    errno = ENOMEM;
+    return nullptr;
+  }
+  directory->fd = fd;
+  return directory;
+}
+
+struct dirent* readdir(DIR* directory) {
+  if (!directory) {
+    errno = EBADF;
+    return nullptr;
+  }
+  if (!directory->started) {
+    std::wstring pattern = DirectoryPathOf(directory->fd);
+    if (pattern.empty()) {
+      errno = EBADF;
+      return nullptr;
+    }
+    if (pattern.back() != L'\\')
+      pattern += L'\\';
+    pattern += L'*';
+    directory->search = FindFirstFileW(pattern.c_str(), &directory->found);
+    directory->started = true;
+    if (directory->search == INVALID_HANDLE_VALUE) {
+      const DWORD error = GetLastError();
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_NO_MORE_FILES) {
+        errno = 0;
+        return nullptr;
+      }
+      Fail(error);
+      return nullptr;
+    }
+  } else if (directory->search == INVALID_HANDLE_VALUE ||
+             !FindNextFileW(directory->search, &directory->found)) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_NO_MORE_FILES) {
+      errno = 0;
+      return nullptr;
+    }
+    Fail(error);
+    return nullptr;
+  }
+  const std::string name = Narrow(directory->found.cFileName);
+  if (name.size() >= sizeof(directory->entry.d_name)) {
+    errno = ENAMETOOLONG;
+    return nullptr;
+  }
+  memcpy(directory->entry.d_name, name.c_str(), name.size() + 1);
+  return &directory->entry;
+}
+
+int closedir(DIR* directory) {
+  if (!directory) {
+    errno = EBADF;
+    return -1;
+  }
+  int result = 0;
+  if (directory->search != INVALID_HANDLE_VALUE &&
+      !FindClose(directory->search))
+    result = Fail(GetLastError());
+  if (close(directory->fd) < 0)
+    result = -1;
+  delete directory;
+  return result;
 }
 
 int close(int fd) {
@@ -1431,6 +1559,34 @@ int renameat(int olddirfd, const char* oldpath, int newdirfd,
     return Fail(GetLastError());
   }
   return 0;
+}
+
+int gufo_renameat_noreplace(int olddirfd, const char* oldpath, int newdirfd,
+                            const char* newpath) {
+  const std::wstring from = ResolveAt(olddirfd, oldpath);
+  const std::wstring to = ResolveAt(newdirfd, newpath);
+  if (from.empty() || to.empty()) {
+    errno = EBADF;
+    return -1;
+  }
+  // With MOVEFILE_REPLACE_EXISTING omitted, MoveFileEx performs one
+  // no-replace rename operation and fails if the destination exists.  This
+  // avoids FileRenameInfo's broken RootDirectory handling in current Win32
+  // while preserving the cache publisher's atomic collision behavior.
+  if (MoveFileExW(from.c_str(), to.c_str(), 0)) {
+    return 0;
+  }
+  const DWORD error = GetLastError();
+  // Windows reports an occupied destination as ACCESS_DENIED on some
+  // Windows filesystems.  Resolve that ambiguous status only after the atomic
+  // no-replace operation has failed, so the rename itself remains race-free.
+  if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS ||
+      (error == ERROR_ACCESS_DENIED &&
+       GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES)) {
+    errno = EEXIST;
+    return -1;
+  }
+  return Fail(error);
 }
 
 static FILETIME FiletimeFromTimespec(const struct timespec& ts) {

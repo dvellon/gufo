@@ -3,10 +3,17 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <immintrin.h>
+#ifdef _WIN32
+#include <intrin.h>
+#endif
+#ifndef _WIN32
 #include <linux/fs.h>
+#endif
 #include <sys/file.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -406,8 +413,18 @@ __attribute__((target("pclmul,ssse3"))) std::uint64_t ChecksumFold(
 }  // namespace
 std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
                            std::uint64_t crc) {
+#ifdef _WIN32
+  static const bool folding = [] {
+    int registers[4]{};
+    __cpuid(registers, 1);
+    constexpr int pclmul = 1 << 1;
+    constexpr int ssse3 = 1 << 9;
+    return (registers[2] & pclmul) && (registers[2] & ssse3);
+  }();
+#else
   static const bool folding =
       __builtin_cpu_supports("pclmul") && __builtin_cpu_supports("ssse3");
+#endif
   if (folding && bytes.size() >= 256)
     return ChecksumFold(bytes, crc);
   return ChecksumTable(bytes, crc);
@@ -881,8 +898,13 @@ struct DiskStore::Impl {
   }
   void Rename(int target, const std::string& name) {
     CostTimer timer(publication_stats.filesystem_ns);
+#ifdef _WIN32
+    if (gufo_renameat_noreplace(temporary.Get(), name.c_str(), target,
+                                name.c_str()) < 0)
+#else
     if (syscall(SYS_renameat2, temporary.Get(), name.c_str(), target,
                 name.c_str(), RENAME_NOREPLACE) < 0)
+#endif
       IoError("publish cache file");
   }
   void WriteFile(int fd, std::span<const std::uint8_t> bytes) {

@@ -263,6 +263,7 @@ int unlink(const char* path);
 int unlinkat(int dirfd, const char* path, int flags);
 int rmdir(const char* path);
 int mkdir(const char* path, mode_t mode);
+int mkdirat(int dirfd, const char* path, mode_t mode);
 int access(const char* path, int mode);
 int isatty(int fd);
 pid_t getpid(void);
@@ -291,6 +292,8 @@ int msync(void* addr, size_t length, int flags);
 
 int renameat(int olddirfd, const char* oldpath, int newdirfd,
              const char* newpath);
+int gufo_renameat_noreplace(int olddirfd, const char* oldpath, int newdirfd,
+                            const char* newpath);
 int utimensat(int dirfd, const char* path, const struct timespec times[2],
               int flags);
 int futimens(int fd, const struct timespec times[2]);

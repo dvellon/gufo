@@ -828,6 +828,21 @@ void GenerateQwenGpuResponse(
                 << " accepted=" << stats.total_accepted_tokens
                 << " verification_steps=" << stats.total_verification_steps
                 << '\n';
+      const auto& timing = verifier->GetTimingStats();
+      if (timing.draft_calls != 0 || timing.target_calls != 0) {
+        constexpr double nanoseconds_per_millisecond = 1'000'000.0;
+        std::cerr << "[SpeculativeTiming]: draft_ms="
+                  << timing.draft_proposal_nanoseconds /
+                         nanoseconds_per_millisecond
+                  << " target_ms="
+                  << timing.target_verification_nanoseconds /
+                         nanoseconds_per_millisecond
+                  << " feedback_ms="
+                  << timing.feedback_nanoseconds /
+                         nanoseconds_per_millisecond
+                  << " draft_calls=" << timing.draft_calls
+                  << " target_calls=" << timing.target_calls << '\n';
+      }
     }
     const double rate = seconds > 0 ? generated_count / seconds : 0;
     std::cout << "Generated " << generated_count << " tokens on GPU in "

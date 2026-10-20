@@ -90,6 +90,22 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   // 3. Kernel Driver Check
   if (section == "all" || section == "inventory") {
     CompatibilityItem driver_item;
+#ifdef _WIN32
+    driver_item.component = "hip_runtime";
+    driver_item.detected_value =
+        inventory.gpu.driver_name + ": " + inventory.gpu.availability;
+    driver_item.required_value = "HIP: available";
+    driver_item.evidence = "HIP device discovery";
+    if (inventory.gpu.availability == "available") {
+      driver_item.verdict = CompatibilityVerdict::kSupported;
+      driver_item.remediation_hint = "None";
+    } else {
+      driver_item.verdict = CompatibilityVerdict::kUnsupported;
+      driver_item.remediation_hint =
+          "Install a Windows AMD driver exposing the gfx1151 HIP runtime";
+      overall = CompatibilityVerdict::kUnsupported;
+    }
+#else
     driver_item.component = "kernel_driver";
     driver_item.detected_value = "amdgpu: " + inventory.toolchain.amdgpu_status;
     driver_item.required_value = "amdgpu: loaded";
@@ -103,6 +119,7 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
           "Ensure Linux kernel >= 6.10 with the amdgpu driver loaded";
       overall = CompatibilityVerdict::kUnsupported;
     }
+#endif
     report.items.push_back(std::move(driver_item));
   }
 

@@ -23,6 +23,7 @@ import tempfile
 from typing import Any, Sequence
 
 import flashmap_5k_plan as planner
+import flashmap_resident_capture as resident
 from flashmap_trace import TraceError, TraceExpectations, TraceReader, scan_partial
 
 
@@ -418,6 +419,98 @@ def _capture(args: argparse.Namespace, manifest: dict[str, object]) -> None:
     )
     launched = 0
     with _ExclusiveLock(output / "capture.lock"):
+        if args.resident_capture:
+            selected: list[dict[str, object]] = []
+            for shard in manifest["shards"]:
+                ordinal = int(shard["shard_ordinal"])
+                input_path = args.plan.resolve() / str(shard["input"])
+                rows = _load_rows(
+                    input_path,
+                    expected_bytes=shard["input_bytes"],
+                    expected_sha256=shard["input_sha256"],
+                )
+                directory = output / f"shard-{ordinal:05d}"
+                state, artifact = _shard_state(directory, expected, shard, rows)
+                if state == "complete":
+                    if selected:
+                        break
+                    print(
+                        "FLASHMAP_CAPTURE_SHARD_REUSED"
+                        f" ordinal={ordinal} output={artifact}"
+                    )
+                    continue
+                if state == "partial":
+                    raise OrchestrationError(
+                        f"shard {ordinal} has a preserved partial; recover it "
+                        "with the single-shard path before resident capture"
+                    )
+                selected.append(shard)
+                if args.max_new_shards and len(selected) >= args.max_new_shards:
+                    break
+            if not selected:
+                print(
+                    "FLASHMAP_5K_CAPTURE_PROGRESS_OK"
+                    f" launched=0 total_shards={len(manifest['shards'])}"
+                )
+                return
+            job_manifest = resident.build_manifest(
+                plan_root=args.plan.resolve(),
+                capture_root=output,
+                shards=selected,
+                target_sha256=args.target_sha256,
+                producer_sha256=args.capture_sha256,
+                producer_git_commit=args.capture_git,
+                feature_abi_sha256=planner.FEATURE_ABI_SHA256,
+                max_context=args.max_record_tokens,
+            )
+            job_path, job_sha256 = resident.publish_manifest(
+                output / "resident-jobs", job_manifest
+            )
+            resident.validate_manifest(job_path, job_sha256)
+            command = [
+                str(capture),
+                "--model",
+                str(model),
+                "--resident-manifest",
+                str(job_path),
+                "--resident-manifest-sha256",
+                job_sha256,
+            ]
+            environment = os.environ.copy()
+            environment["TEMP"] = str(runtime_temp)
+            environment["TMP"] = str(runtime_temp)
+            result = subprocess.run(command, env=environment, check=False)
+            if result.returncode != 0:
+                raise OrchestrationError(
+                    "resident capture failed with exit "
+                    f"{result.returncode}; published shards and active partial are preserved"
+                )
+            for shard in selected:
+                ordinal = int(shard["shard_ordinal"])
+                input_path = args.plan.resolve() / str(shard["input"])
+                rows = _load_rows(
+                    input_path,
+                    expected_bytes=shard["input_bytes"],
+                    expected_sha256=shard["input_sha256"],
+                )
+                directory = output / f"shard-{ordinal:05d}"
+                state, artifact = _shard_state(directory, expected, shard, rows)
+                if state != "complete":
+                    raise OrchestrationError(
+                        f"resident capture returned success without valid shard {ordinal}"
+                    )
+                launched += 1
+                print(
+                    "FLASHMAP_CAPTURE_SHARD_OK"
+                    f" ordinal={ordinal} records={shard['records']}"
+                    f" tokens={shard['tokens']} output={artifact}"
+                )
+            print(
+                "FLASHMAP_5K_CAPTURE_PROGRESS_OK"
+                f" launched={launched} total_shards={len(manifest['shards'])}"
+                f" resident_manifest_sha256={job_sha256}"
+            )
+            return
         for shard in manifest["shards"]:
             ordinal = int(shard["shard_ordinal"])
             input_path = args.plan.resolve() / str(shard["input"])
@@ -508,6 +601,11 @@ def _normalize(args: argparse.Namespace) -> None:
         args.capture_git = _hex(args.capture_git, "capture_git", 40)
         if args.max_new_shards < 0:
             raise OrchestrationError("max_new_shards must be nonnegative")
+        if args.resident_capture and args.retry_partial_shard:
+            raise OrchestrationError(
+                "resident capture does not accept partial-shard retry; recover the "
+                "partial with the single-shard path first"
+            )
     for name in (
         "expected_records",
         "vocabulary_size",
@@ -663,6 +761,7 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--runtime-temp", type=Path, required=True)
     capture.add_argument("--max-new-shards", type=int, default=0)
     capture.add_argument("--retry-partial-shard", action="store_true")
+    capture.add_argument("--resident-capture", action="store_true")
     commands.add_parser("self-test")
     return parser
 
@@ -682,6 +781,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, planner.PlanError, OrchestrationError) as error:
+    except (
+        OSError,
+        planner.PlanError,
+        resident.ResidentCaptureError,
+        OrchestrationError,
+    ) as error:
         print(f"FLASHMAP_5K_ORCHESTRATION_FAILED: {error}", file=sys.stderr)
         raise SystemExit(1) from error

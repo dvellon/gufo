@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <random>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -38,12 +40,12 @@ namespace qfn = gufo::models::qwen38_flash_next;
 namespace {
 
 constexpr std::array<std::uint32_t, 6> kLayerTaps{1, 12, 23, 34, 45, 47};
-constexpr std::array<std::uint8_t, 8> kFileMagic{'G', 'F', 'M', 'T', 'R', 'C',
-                                                 '2', 0};
-constexpr std::array<std::uint8_t, 8> kRecordMagic{'G', 'F', 'M', 'R', 'E', 'C',
-                                                   '2', 0};
-constexpr std::array<std::uint8_t, 8> kCommitMagic{'G', 'F', 'M', 'E', 'N', 'D',
-                                                   '2', 0};
+constexpr std::array<std::uint8_t, 8> kFileMagic{'G', 'F', 'M', 'T',
+                                                 'R', 'C', '2', 0};
+constexpr std::array<std::uint8_t, 8> kRecordMagic{'G', 'F', 'M', 'R',
+                                                   'E', 'C', '2', 0};
+constexpr std::array<std::uint8_t, 8> kCommitMagic{'G', 'F', 'M', 'E',
+                                                   'N', 'D', '2', 0};
 constexpr std::string_view kIdentityScheme = "gguf-sha256-v1";
 constexpr std::string_view kFeatureAbi =
     "gufo.flashmap.feature.v1\n"
@@ -97,8 +99,8 @@ std::array<std::uint8_t, 32> HashBytes(std::span<const std::uint8_t> bytes) {
 }
 
 std::array<std::uint8_t, 32> HashString(std::string_view value) {
-  return HashBytes({reinterpret_cast<const std::uint8_t*>(value.data()),
-                    value.size()});
+  return HashBytes(
+      {reinterpret_cast<const std::uint8_t*>(value.data()), value.size()});
 }
 
 std::array<std::uint8_t, 32> DecodeSha256(std::string_view value) {
@@ -126,7 +128,8 @@ std::array<std::uint8_t, 32> DecodeSha256(std::string_view value) {
 
 std::array<std::uint8_t, 20> DecodeGitCommit(std::string_view value) {
   if (value.size() != 40)
-    throw std::runtime_error("producer Git commit is not 40 hexadecimal digits");
+    throw std::runtime_error(
+        "producer Git commit is not 40 hexadecimal digits");
   std::array<std::uint8_t, 20> result{};
   for (std::size_t index = 0; index < result.size(); ++index) {
     const auto digit = [](char c) -> int {
@@ -217,8 +220,8 @@ gufo::json::Value CanonicalValue(const gufo::json::Value& value) {
 std::filesystem::path ExecutablePath() {
 #ifdef _WIN32
   std::wstring buffer(32768, L'\0');
-  const DWORD length =
-      GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  const DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
+                                          static_cast<DWORD>(buffer.size()));
   if (length == 0 || length == buffer.size())
     throw std::runtime_error("cannot resolve producer executable");
   buffer.resize(length);
@@ -237,10 +240,9 @@ public:
   explicit TraceSink(const std::filesystem::path& path) {
 #ifdef _WIN32
     int descriptor = -1;
-    const errno_t status =
-        _wsopen_s(&descriptor, path.c_str(),
-                  _O_BINARY | _O_CREAT | _O_EXCL | _O_WRONLY, _SH_DENYRW,
-                  _S_IREAD | _S_IWRITE);
+    const errno_t status = _wsopen_s(&descriptor, path.c_str(),
+                                     _O_BINARY | _O_CREAT | _O_EXCL | _O_WRONLY,
+                                     _SH_DENYRW, _S_IREAD | _S_IWRITE);
     if (status != 0 || descriptor < 0)
       throw std::runtime_error("cannot exclusively create partial trace");
     file_ = _fdopen(descriptor, "wb");
@@ -250,8 +252,8 @@ public:
     }
 #else
     const int descriptor =
-        ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-               0600);
+        ::open(path.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (descriptor < 0)
       throw std::runtime_error("cannot exclusively create partial trace");
     file_ = ::fdopen(descriptor, "wb");
@@ -345,6 +347,28 @@ void PublishNoReplace(const std::filesystem::path& partial,
 #endif
 }
 
+std::string FinalizeHipRuntime(bool* initialized) {
+  if (!*initialized)
+    return {};
+  *initialized = false;
+#ifdef _WIN32
+  std::string error;
+  if (const hipError_t status = hipDeviceSynchronize(); status != hipSuccess) {
+    error = std::string("HIP final synchronization failed: ") +
+            hipGetErrorString(status);
+  }
+  if (const hipError_t status = hipDeviceReset(); status != hipSuccess) {
+    if (!error.empty())
+      error += "; ";
+    error +=
+        std::string("HIP device reset failed: ") + hipGetErrorString(status);
+  }
+  return error;
+#else
+  return {};
+#endif
+}
+
 std::array<std::uint8_t, 16> MakeUuid() {
   std::array<std::uint8_t, 16> result{};
   std::random_device random;
@@ -376,7 +400,8 @@ std::vector<std::uint8_t> MakeFileHeader(
   PutU32(bytes, 40, vocab_size);
   for (std::size_t index = 0; index < kLayerTaps.size(); ++index)
     PutU32(bytes, 48 + index * 4, kLayerTaps[index]);
-  std::memcpy(bytes.data() + 80, kIdentityScheme.data(), kIdentityScheme.size());
+  std::memcpy(bytes.data() + 80, kIdentityScheme.data(),
+              kIdentityScheme.size());
   const auto target = DecodeSha256(target_identity);
   std::ranges::copy(target, bytes.begin() + 96);
   const auto abi = HashString(kFeatureAbi);
@@ -418,7 +443,8 @@ InputRecord ParseRecord(const gufo::json::Value& value, const qfn::Model& model,
       source_id->str().empty())
     throw std::runtime_error("JSONL row requires non-empty string source_id");
   if ((text != nullptr) == (token_values != nullptr))
-    throw std::runtime_error("JSONL row requires exactly one of text or tokens");
+    throw std::runtime_error(
+        "JSONL row requires exactly one of text or tokens");
   InputRecord result{.id = id->str(), .source_id = source_id->str()};
   if (text != nullptr) {
     if (!text->is_string() || text->str().empty())
@@ -546,6 +572,8 @@ struct Arguments {
   std::filesystem::path model;
   std::filesystem::path input;
   std::filesystem::path output;
+  std::filesystem::path resident_manifest;
+  std::string resident_manifest_sha256;
   std::string producer_git;
   std::uint32_t max_context{4096};
   std::uint64_t shard_ordinal{};
@@ -564,6 +592,10 @@ Arguments ParseArguments(int argc, char** argv) {
       args.input = value;
     else if (option == "--output")
       args.output = value;
+    else if (option == "--resident-manifest")
+      args.resident_manifest = value;
+    else if (option == "--resident-manifest-sha256")
+      args.resident_manifest_sha256 = value;
     else if (option == "--producer-git")
       args.producer_git = value;
     else if (option == "--max-context")
@@ -573,24 +605,312 @@ Arguments ParseArguments(int argc, char** argv) {
     else
       throw std::runtime_error("unknown option: " + std::string(option));
   }
-  if (args.model.empty() || args.input.empty() || args.output.empty() ||
-      args.producer_git.empty() || args.max_context == 0)
+  const bool resident = !args.resident_manifest.empty();
+  const bool single =
+      !args.input.empty() || !args.output.empty() || !args.producer_git.empty();
+  if (args.model.empty() || resident == single ||
+      (resident && args.resident_manifest_sha256.empty()) ||
+      (!resident && (args.input.empty() || args.output.empty() ||
+                     args.producer_git.empty())) ||
+      args.max_context == 0)
     throw std::runtime_error(
-        "requires --model GGUF --input RECORDS.jsonl --output DIRECTORY "
-        "--producer-git COMMIT [--max-context N] [--shard-ordinal N]");
-  (void)DecodeGitCommit(args.producer_git);
+        "requires --model GGUF and exactly one of: --input RECORDS.jsonl "
+        "--output DIRECTORY --producer-git COMMIT [--max-context N] "
+        "[--shard-ordinal N], or --resident-manifest JOBS.json "
+        "--resident-manifest-sha256 SHA256");
+  if (!resident)
+    (void)DecodeGitCommit(args.producer_git);
+  else
+    (void)DecodeSha256(args.resident_manifest_sha256);
   return args;
+}
+
+struct ResidentJob {
+  std::filesystem::path input;
+  std::filesystem::path output;
+  std::string input_sha256;
+  std::uint64_t input_bytes{};
+  std::uint64_t expected_gfm_bytes{};
+  std::uint64_t shard_ordinal{};
+  std::uint64_t first_index{};
+  std::uint64_t last_index{};
+  std::uint64_t records{};
+  std::uint64_t tokens{};
+};
+
+struct ResidentManifest {
+  std::string target_sha256;
+  std::string producer_sha256;
+  std::string producer_git;
+  std::uint32_t max_context{};
+  std::vector<ResidentJob> jobs;
+};
+
+void RequireKeys(const gufo::json::Value& value,
+                 std::initializer_list<std::string_view> keys,
+                 std::string_view label) {
+  if (!value.is_object() || value.members().size() != keys.size())
+    throw std::runtime_error(std::string(label) + " has unexpected fields");
+  for (const auto& [key, unused] : value.members()) {
+    (void)unused;
+    if (std::ranges::find(keys, key) == keys.end())
+      throw std::runtime_error(std::string(label) + " has unexpected field " +
+                               key);
+  }
+}
+
+std::string RequireString(const gufo::json::Value& value, std::string_view key,
+                          std::string_view label) {
+  const auto* field = value.find(std::string(key));
+  if (field == nullptr || !field->is_string() || field->str().empty())
+    throw std::runtime_error(std::string(label) + " requires string " +
+                             std::string(key));
+  return field->str();
+}
+
+std::uint64_t RequireU64(const gufo::json::Value& value, std::string_view key,
+                         bool positive, std::string_view label) {
+  const auto* field = value.find(std::string(key));
+  if (field == nullptr || !field->is_number())
+    throw std::runtime_error(std::string(label) + " requires integer " +
+                             std::string(key));
+  const double number = field->as_double(-1.0);
+  if (!std::isfinite(number) || number < 0.0 || std::floor(number) != number ||
+      number > 9007199254740991.0 || (positive && number == 0.0))
+    throw std::runtime_error(std::string(label) + " has invalid integer " +
+                             std::string(key));
+  return static_cast<std::uint64_t>(number);
+}
+
+std::filesystem::path RequireAbsolutePath(const gufo::json::Value& value,
+                                          std::string_view key,
+                                          std::string_view label) {
+  const std::filesystem::path path = RequireString(value, key, label);
+  if (!path.is_absolute() || path.lexically_normal() != path)
+    throw std::runtime_error(std::string(label) + " " + std::string(key) +
+                             " must be an absolute normalized path");
+  return path;
+}
+
+ResidentManifest ParseResidentManifest(const Arguments& args,
+                                       std::string_view producer_sha256) {
+  if (!std::filesystem::is_regular_file(args.resident_manifest) ||
+      std::filesystem::is_symlink(args.resident_manifest))
+    throw std::runtime_error(
+        "resident manifest must be a regular non-symlink file");
+  if (gufo::crypto::Sha256FileHex(args.resident_manifest) !=
+      args.resident_manifest_sha256)
+    throw std::runtime_error("resident manifest SHA-256 differs");
+  const auto manifest_bytes =
+      std::filesystem::file_size(args.resident_manifest);
+  if (manifest_bytes == 0 || manifest_bytes > kMaxJsonLineBytes)
+    throw std::runtime_error("resident manifest size is unsafe");
+  std::ifstream stream(args.resident_manifest, std::ios::binary);
+  std::string bytes(static_cast<std::size_t>(manifest_bytes), '\0');
+  stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (stream.gcount() != static_cast<std::streamsize>(bytes.size()) ||
+      stream.peek() != std::char_traits<char>::eof() ||
+      gufo::crypto::Sha256FileHex(args.resident_manifest) !=
+          args.resident_manifest_sha256)
+    throw std::runtime_error("resident manifest cannot be read safely");
+  const auto root = gufo::json::parse(bytes);
+  RequireKeys(
+      root,
+      {"format", "target_sha256", "producer_sha256", "producer_git_commit",
+       "feature_abi_sha256", "max_context", "jobs"},
+      "resident manifest");
+  if (RequireString(root, "format", "resident manifest") !=
+      "gufo.flashmap.resident-capture.v1")
+    throw std::runtime_error("resident manifest format differs");
+  ResidentManifest result;
+  result.target_sha256 =
+      RequireString(root, "target_sha256", "resident manifest");
+  result.producer_sha256 =
+      RequireString(root, "producer_sha256", "resident manifest");
+  result.producer_git =
+      RequireString(root, "producer_git_commit", "resident manifest");
+  (void)DecodeSha256(result.target_sha256);
+  (void)DecodeSha256(result.producer_sha256);
+  (void)DecodeGitCommit(result.producer_git);
+  if (result.producer_sha256 != producer_sha256)
+    throw std::runtime_error("resident manifest producer SHA-256 differs");
+  if (RequireString(root, "feature_abi_sha256", "resident manifest") !=
+      Hex(HashString(kFeatureAbi)))
+    throw std::runtime_error("resident manifest feature ABI differs");
+  const std::uint64_t max_context =
+      RequireU64(root, "max_context", true, "resident manifest");
+  if (max_context > std::numeric_limits<std::uint32_t>::max())
+    throw std::runtime_error("resident manifest max_context exceeds U32");
+  result.max_context = static_cast<std::uint32_t>(max_context);
+  const auto* jobs = root.find("jobs");
+  if (jobs == nullptr || !jobs->is_array() || jobs->items().empty())
+    throw std::runtime_error("resident manifest requires non-empty jobs");
+  std::set<std::filesystem::path> inputs;
+  std::set<std::filesystem::path> outputs;
+  std::set<std::uint64_t> ordinals;
+  std::uint64_t next_index = 0;
+  bool first = true;
+  for (const auto& value : jobs->items()) {
+    RequireKeys(
+        value,
+        {"input", "input_sha256", "input_bytes", "output", "expected_gfm_bytes",
+         "shard_ordinal", "first_index", "last_index", "records", "tokens"},
+        "resident job");
+    ResidentJob job;
+    job.input = RequireAbsolutePath(value, "input", "resident job");
+    job.output = RequireAbsolutePath(value, "output", "resident job");
+    job.input_sha256 = RequireString(value, "input_sha256", "resident job");
+    (void)DecodeSha256(job.input_sha256);
+    job.input_bytes = RequireU64(value, "input_bytes", true, "resident job");
+    job.expected_gfm_bytes =
+        RequireU64(value, "expected_gfm_bytes", true, "resident job");
+    job.shard_ordinal =
+        RequireU64(value, "shard_ordinal", false, "resident job");
+    job.first_index = RequireU64(value, "first_index", false, "resident job");
+    job.last_index = RequireU64(value, "last_index", false, "resident job");
+    job.records = RequireU64(value, "records", true, "resident job");
+    job.tokens = RequireU64(value, "tokens", true, "resident job");
+    if (job.last_index < job.first_index ||
+        job.last_index - job.first_index + 1 != job.records)
+      throw std::runtime_error("resident job record range differs from count");
+    if ((!first && job.first_index != next_index) ||
+        !inputs.insert(job.input).second ||
+        !outputs.insert(job.output).second ||
+        !ordinals.insert(job.shard_ordinal).second)
+      throw std::runtime_error("resident jobs are duplicate or non-contiguous");
+    first = false;
+    next_index = job.last_index + 1;
+    result.jobs.push_back(std::move(job));
+  }
+  return result;
+}
+
+void PreflightResidentJob(const ResidentJob& job) {
+  if (!std::filesystem::is_regular_file(job.input) ||
+      std::filesystem::is_symlink(job.input))
+    throw std::runtime_error(
+        "resident job input is not a regular non-symlink file");
+  if (std::filesystem::file_size(job.input) != job.input_bytes ||
+      gufo::crypto::Sha256FileHex(job.input) != job.input_sha256)
+    throw std::runtime_error("resident job input identity differs");
+  if (std::filesystem::exists(job.output) ||
+      std::filesystem::is_symlink(job.output))
+    throw std::runtime_error("resident job output already exists");
+  const auto parent = job.output.parent_path();
+  if (!std::filesystem::is_directory(parent) ||
+      std::filesystem::is_symlink(parent))
+    throw std::runtime_error("resident job output parent is unsafe");
+}
+
+struct CaptureResult {
+  std::uint64_t records{};
+  std::uint64_t tokens{};
+  std::array<std::uint8_t, 32> digest{};
+  std::filesystem::path output;
+};
+
+CaptureResult CaptureShard(const std::shared_ptr<qfn::Model>& model,
+                           const std::filesystem::path& input_path,
+                           const std::filesystem::path& output_directory,
+                           std::uint32_t max_context,
+                           std::uint64_t shard_ordinal,
+                           const std::array<std::uint8_t, 32>& producer,
+                           const std::array<std::uint8_t, 20>& producer_git,
+                           std::string* error, std::filesystem::path* partial,
+                           bool publish_now,
+                           const ResidentJob* expected = nullptr) {
+  const auto shard_uuid = MakeUuid();
+  *partial = output_directory / ("shard-" + Hex(shard_uuid) + ".gfm.partial");
+  if (expected != nullptr &&
+      std::filesystem::directory_iterator(output_directory) !=
+          std::filesystem::directory_iterator())
+    throw std::runtime_error("resident shard directory is not empty");
+  std::ifstream input(input_path, std::ios::binary);
+  if (!input)
+    throw std::runtime_error("cannot open prompt JSONL");
+  const std::string identity = model->ArtifactIdentityHex();
+  TraceSink sink(*partial);
+  sink.Write(MakeFileHeader(model->config().hidden_size, max_context,
+                            model->VocabSize(), identity, producer,
+                            producer_git, shard_ordinal, shard_uuid));
+  sink.Durable();
+
+  std::uint64_t records = 0;
+  std::uint64_t total_tokens = 0;
+  std::unordered_set<std::string> sample_ids;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.empty())
+      continue;
+    if (line.size() > kMaxJsonLineBytes)
+      throw std::runtime_error("JSONL row exceeds 16 MiB");
+    const InputRecord record =
+        ParseRecord(gufo::json::parse(line), *model, max_context);
+    const std::string sample_digest = Hex(HashString(record.id));
+    if (!sample_ids.insert(sample_digest).second)
+      throw std::runtime_error("duplicate sample id in trace shard");
+    std::vector<float> features;
+    if (!model->CaptureFlashMapFeatures(record.tokens, kLayerTaps, &features,
+                                        error))
+      throw std::runtime_error("feature capture failed: " + *error);
+    WriteRecord(&sink, record, features, records);
+    ++records;
+    total_tokens += record.tokens.size();
+    std::fprintf(
+        stderr,
+        "FLASHMAP_RECORD_COMMITTED shard=%llu ordinal=%llu tokens=%zu\n",
+        static_cast<unsigned long long>(shard_ordinal),
+        static_cast<unsigned long long>(records - 1), record.tokens.size());
+  }
+  if (!input.eof())
+    throw std::runtime_error("prompt JSONL read failed");
+  if (records == 0)
+    throw std::runtime_error("prompt JSONL contained no records");
+  if (expected != nullptr &&
+      (records != expected->records || total_tokens != expected->tokens))
+    throw std::runtime_error("resident shard totals differ from manifest");
+  if (expected != nullptr &&
+      (std::filesystem::file_size(expected->input) != expected->input_bytes ||
+       gufo::crypto::Sha256FileHex(expected->input) != expected->input_sha256))
+    throw std::runtime_error("resident shard input changed during capture");
+  CaptureResult result{
+      .records = records, .tokens = total_tokens, .digest = sink.FinishHash()};
+  sink.Close();
+  if (expected != nullptr &&
+      std::filesystem::file_size(*partial) != expected->expected_gfm_bytes)
+    throw std::runtime_error("resident shard byte count differs from manifest");
+  if (expected != nullptr) {
+    std::size_t entries = 0;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(output_directory)) {
+      if (entry.path() != *partial || entry.is_symlink())
+        throw std::runtime_error(
+            "resident shard directory changed during capture");
+      ++entries;
+    }
+    if (entries != 1)
+      throw std::runtime_error("resident shard partial is not exclusive");
+  }
+  result.output = output_directory / ("sha256-" + Hex(result.digest) + ".gfm");
+  if (publish_now) {
+    PublishNoReplace(*partial, result.output);
+    partial->clear();
+  }
+  return result;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   std::filesystem::path partial;
+  std::shared_ptr<qfn::Model> model;
+  bool hip_initialized = false;
   try {
     if (argc == 3 && std::string_view(argv[1]) == "--self-test-output") {
       const std::filesystem::path directory = argv[2];
       if (!std::filesystem::is_directory(directory))
-        throw std::runtime_error("self-test output must be an existing directory");
+        throw std::runtime_error(
+            "self-test output must be an existing directory");
       const auto shard_uuid = MakeUuid();
       partial = directory / ("shard-" + Hex(shard_uuid) + ".gfm.partial");
       const auto producer =
@@ -609,96 +929,118 @@ int main(int argc, char** argv) {
                          .metadata = "{\"kind\":\"synthetic\"}"};
       std::vector<float> features(3 * kLayerTaps.size() * 2560);
       for (std::size_t index = 0; index < features.size(); ++index)
-        features[index] = static_cast<float>(static_cast<int>(index % 31) - 15) /
-                          16.0F;
+        features[index] =
+            static_cast<float>(static_cast<int>(index % 31) - 15) / 16.0F;
       WriteRecord(&sink, record, features, 0);
       const auto file_digest = sink.FinishHash();
       sink.Close();
-      const auto output =
-          directory / ("sha256-" + Hex(file_digest) + ".gfm");
+      const auto output = directory / ("sha256-" + Hex(file_digest) + ".gfm");
       PublishNoReplace(partial, output);
       std::printf(
           "FLASHMAP_TRACE_SELFTEST_WRITTEN target=%s abi=%s producer=%s "
           "sha256=%s output=%s\n",
-          std::string(target_identity).c_str(), Hex(HashString(kFeatureAbi)).c_str(),
-          Hex(producer).c_str(), Hex(file_digest).c_str(),
-          output.string().c_str());
+          std::string(target_identity).c_str(),
+          Hex(HashString(kFeatureAbi)).c_str(), Hex(producer).c_str(),
+          Hex(file_digest).c_str(), output.string().c_str());
       return 0;
     }
     const Arguments args = ParseArguments(argc, argv);
-    if (!std::filesystem::is_directory(args.output))
-      throw std::runtime_error("output must be an existing directory");
-    const auto shard_uuid = MakeUuid();
-    partial = args.output /
-              ("shard-" + Hex(shard_uuid) + ".gfm.partial");
-    std::ifstream input(args.input, std::ios::binary);
-    if (!input)
-      throw std::runtime_error("cannot open prompt JSONL");
+    const std::string producer_sha256 =
+        gufo::crypto::Sha256FileHex(ExecutablePath());
+    const auto producer = DecodeSha256(producer_sha256);
+    const bool resident = !args.resident_manifest.empty();
+    ResidentManifest manifest;
+    std::uint32_t max_context = args.max_context;
+    std::array<std::uint8_t, 20> producer_git{};
+    if (resident) {
+      manifest = ParseResidentManifest(args, producer_sha256);
+      max_context = manifest.max_context;
+      producer_git = DecodeGitCommit(manifest.producer_git);
+      for (const auto& job : manifest.jobs)
+        PreflightResidentJob(job);
+    } else {
+      if (!std::filesystem::is_directory(args.output) ||
+          std::filesystem::is_symlink(args.output))
+        throw std::runtime_error(
+            "output must be an existing non-symlink directory");
+      producer_git = DecodeGitCommit(args.producer_git);
+    }
     if (const hipError_t status = hipInit(0); status != hipSuccess)
       throw std::runtime_error(std::string("HIP initialization failed: ") +
                                hipGetErrorString(status));
+    hip_initialized = true;
     std::string error;
     qfn::ModelOptions options;
-    options.max_context = args.max_context;
-    auto model = qfn::Model::Load(args.model.string(), options, &error);
+    options.max_context = max_context;
+    model = qfn::Model::Load(args.model.string(), options, &error);
     if (!model)
       throw std::runtime_error("model load failed: " + error);
     const std::string identity = model->ArtifactIdentityHex();
-    const auto producer =
-        DecodeSha256(gufo::crypto::Sha256FileHex(ExecutablePath()));
-    const auto producer_git = DecodeGitCommit(args.producer_git);
-    TraceSink sink(partial);
-    sink.Write(MakeFileHeader(model->config().hidden_size, args.max_context,
-                              model->VocabSize(), identity, producer,
-                              producer_git,
-                              args.shard_ordinal, shard_uuid));
-    sink.Durable();
-
-    std::uint64_t records = 0;
-    std::uint64_t total_tokens = 0;
-    std::unordered_set<std::string> sample_ids;
-    std::string line;
-    while (std::getline(input, line)) {
-      if (line.empty())
-        continue;
-      if (line.size() > kMaxJsonLineBytes)
-        throw std::runtime_error("JSONL row exceeds 16 MiB");
-      const InputRecord record =
-          ParseRecord(gufo::json::parse(line), *model, args.max_context);
-      const std::string sample_digest = Hex(HashString(record.id));
-      if (!sample_ids.insert(sample_digest).second)
-        throw std::runtime_error("duplicate sample id in trace shard");
-      std::vector<float> features;
-      if (!model->CaptureFlashMapFeatures(record.tokens, kLayerTaps, &features,
-                                          &error))
-        throw std::runtime_error("feature capture failed: " + error);
-      WriteRecord(&sink, record, features, records);
-      ++records;
-      total_tokens += record.tokens.size();
-      std::fprintf(stderr,
-                   "FLASHMAP_RECORD_COMMITTED ordinal=%llu tokens=%zu\n",
-                   static_cast<unsigned long long>(records - 1),
-                   record.tokens.size());
+    CaptureResult single_result;
+    if (resident && identity != manifest.target_sha256)
+      throw std::runtime_error("resident manifest target identity differs");
+    if (resident) {
+      for (const auto& job : manifest.jobs) {
+        // Repeat the complete preflight after model loading.  A competing
+        // creator cannot turn a previously absent destination into a reused
+        // shard while this process is resident.
+        PreflightResidentJob(job);
+        std::error_code directory_error;
+        if (!std::filesystem::create_directory(job.output, directory_error) ||
+            directory_error)
+          throw std::runtime_error(
+              "cannot exclusively create resident shard directory");
+        const CaptureResult result = CaptureShard(
+            model, job.input, job.output, max_context, job.shard_ordinal,
+            producer, producer_git, &error, &partial, true, &job);
+        std::printf(
+            "FLASHMAP_RESIDENT_SHARD_OK shard=%llu first=%llu last=%llu "
+            "records=%llu tokens=%llu target=%s abi=%s producer=%s "
+            "producer_git=%s sha256=%s output=%s\n",
+            static_cast<unsigned long long>(job.shard_ordinal),
+            static_cast<unsigned long long>(job.first_index),
+            static_cast<unsigned long long>(job.last_index),
+            static_cast<unsigned long long>(result.records),
+            static_cast<unsigned long long>(result.tokens), identity.c_str(),
+            Hex(HashString(kFeatureAbi)).c_str(), Hex(producer).c_str(),
+            manifest.producer_git.c_str(), Hex(result.digest).c_str(),
+            result.output.string().c_str());
+      }
+    } else {
+      single_result = CaptureShard(model, args.input, args.output, max_context,
+                                   args.shard_ordinal, producer, producer_git,
+                                   &error, &partial, false);
     }
-    if (!input.eof())
-      throw std::runtime_error("prompt JSONL read failed");
-    if (records == 0)
-      throw std::runtime_error("prompt JSONL contained no records");
-    const auto file_digest = sink.FinishHash();
-    sink.Close();
-    const auto output =
-        args.output / ("sha256-" + Hex(file_digest) + ".gfm");
-    PublishNoReplace(partial, output);
-    std::printf(
-        "FLASHMAP_TRACE_OK records=%llu tokens=%llu target=%s abi=%s "
-        "producer=%s producer_git=%s sha256=%s output=%s\n",
-        static_cast<unsigned long long>(records),
-        static_cast<unsigned long long>(total_tokens), identity.c_str(),
-        Hex(HashString(kFeatureAbi)).c_str(), Hex(producer).c_str(),
-        args.producer_git.c_str(), Hex(file_digest).c_str(),
-        output.string().c_str());
+    model.reset();
+    if (const std::string shutdown_error = FinalizeHipRuntime(&hip_initialized);
+        !shutdown_error.empty()) {
+      throw std::runtime_error(shutdown_error);
+    }
+    if (resident)
+      std::printf(
+          "FLASHMAP_RESIDENT_CAPTURE_OK shards=%zu target=%s producer=%s\n",
+          manifest.jobs.size(), identity.c_str(), producer_sha256.c_str());
+    else {
+      PublishNoReplace(partial, single_result.output);
+      partial.clear();
+      std::printf(
+          "FLASHMAP_TRACE_OK records=%llu tokens=%llu target=%s abi=%s "
+          "producer=%s producer_git=%s sha256=%s output=%s\n",
+          static_cast<unsigned long long>(single_result.records),
+          static_cast<unsigned long long>(single_result.tokens),
+          identity.c_str(), Hex(HashString(kFeatureAbi)).c_str(),
+          Hex(producer).c_str(), args.producer_git.c_str(),
+          Hex(single_result.digest).c_str(),
+          single_result.output.string().c_str());
+    }
     return 0;
   } catch (const std::exception& exception) {
+    model.reset();
+    if (const std::string shutdown_error = FinalizeHipRuntime(&hip_initialized);
+        !shutdown_error.empty()) {
+      std::fprintf(stderr, "FLASHMAP_HIP_FINALIZE_FAILED: %s\n",
+                   shutdown_error.c_str());
+    }
     std::fprintf(stderr, "FLASHMAP_TRACE_FAILED: %s partial=%s\n",
                  exception.what(), partial.string().c_str());
     return 1;

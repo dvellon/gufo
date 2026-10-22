@@ -283,9 +283,8 @@ PromptRecord ParsePromptRecord(const gufo::json::Value& value) {
 
 std::vector<std::int32_t> RenderPrompt(
     const gufo::tokenization::QwenTokenizer& tokenizer,
-    std::size_t vocabulary_size,
-                                       const PromptRecord& record,
-                                       const GenerationConfig& config) {
+    std::size_t vocabulary_size, const PromptRecord& record,
+    const GenerationConfig& config) {
   std::string error;
   const auto tokens = gufo::tokenization::QwenChatTemplate::RenderAndTokenize(
       tokenizer, record.messages, config.chat, &error);
@@ -341,6 +340,44 @@ std::string OutputLine(
   value["generator_git_commit"] = std::string(producer_git);
   value["generation_config_sha256"] = std::string(generation_config_sha256);
   value["metadata"] = OutputMetadata(source, source_file_sha256, termination);
+  return CanonicalJson(value);
+}
+
+bool IsPortableLabel(std::string_view value) {
+  if (value.empty() || value.size() > 128)
+    return false;
+  return std::ranges::all_of(value, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+  });
+}
+
+std::string PromptTokenLine(
+    const PromptRecord& source, std::span<const std::int32_t> prompt,
+    const GenerationConfig& config, std::string_view source_file_sha256,
+    std::string_view executable_sha256, std::string_view producer_git,
+    std::string_view producer_tree,
+    std::string_view tokenizer_model_file_sha256,
+    std::string_view tokenizer_artifact_sha256, std::string_view partition) {
+  auto metadata = gufo::json::Value::object();
+  metadata["chat_template_sha256"] = config.chat_template_sha256;
+  metadata["generation_config_sha256"] = config.sha256;
+  metadata["partition"] = std::string(partition);
+  metadata["prompt_source_file_sha256"] = std::string(source_file_sha256);
+  metadata["prompt_source_record_sha256"] = source.canonical_sha256;
+  metadata["tokenizer_executable_sha256"] = std::string(executable_sha256);
+  metadata["tokenizer_artifact_sha256"] =
+      std::string(tokenizer_artifact_sha256);
+  metadata["tokenizer_git_commit"] = std::string(producer_git);
+  metadata["tokenizer_git_tree"] = std::string(producer_tree);
+  metadata["tokenizer_model_file_sha256"] =
+      std::string(tokenizer_model_file_sha256);
+  metadata["user_metadata"] = source.metadata;
+
+  auto value = gufo::json::Value::object();
+  value["id"] = source.id;
+  value["metadata"] = std::move(metadata);
+  value["prompt_tokens"] = TokenArray(prompt);
+  value["source_id"] = source.source_id;
   return CanonicalJson(value);
 }
 
@@ -593,10 +630,330 @@ bool EndsWithNewline(const std::filesystem::path& path) {
   return input.get() == '\n';
 }
 
+struct PromptTokenArguments {
+  std::filesystem::path model;
+  std::filesystem::path input;
+  std::filesystem::path output;
+  std::filesystem::path generation_config;
+  std::string input_sha256;
+  std::string executable_sha256;
+  std::string generation_config_sha256;
+  std::string producer_git;
+  std::string producer_tree;
+  std::string tokenizer_model_file_sha256;
+  std::string tokenizer_artifact_sha256;
+  std::string partition;
+  std::size_t expected_records{};
+};
+
+PromptTokenArguments ParsePromptTokenArguments(int argc, char** argv) {
+  PromptTokenArguments args;
+  for (int index = 2; index < argc; ++index) {
+    if (index + 1 >= argc)
+      throw std::runtime_error("missing prompt-token option value");
+    const std::string_view option = argv[index];
+    const std::string value = argv[++index];
+    if (option == "--model")
+      args.model = value;
+    else if (option == "--input")
+      args.input = value;
+    else if (option == "--output")
+      args.output = value;
+    else if (option == "--generation-config")
+      args.generation_config = value;
+    else if (option == "--generation-config-sha256")
+      args.generation_config_sha256 = value;
+    else if (option == "--input-sha256")
+      args.input_sha256 = value;
+    else if (option == "--executable-sha256")
+      args.executable_sha256 = value;
+    else if (option == "--producer-git")
+      args.producer_git = value;
+    else if (option == "--producer-tree")
+      args.producer_tree = value;
+    else if (option == "--tokenizer-model-file-sha256")
+      args.tokenizer_model_file_sha256 = value;
+    else if (option == "--tokenizer-artifact-sha256")
+      args.tokenizer_artifact_sha256 = value;
+    else if (option == "--partition")
+      args.partition = value;
+    else if (option == "--expected-records")
+      args.expected_records = std::stoull(value);
+    else
+      throw std::runtime_error("unknown prompt-token option: " +
+                               std::string(option));
+  }
+  if (args.model.empty() || args.input.empty() || args.output.empty() ||
+      args.generation_config.empty() || args.generation_config_sha256.empty() ||
+      args.input_sha256.empty() || args.executable_sha256.empty() ||
+      args.producer_git.empty() || args.producer_tree.empty() ||
+      args.tokenizer_model_file_sha256.empty() ||
+      args.tokenizer_artifact_sha256.empty() || args.partition.empty() ||
+      args.expected_records == 0) {
+    throw std::runtime_error(
+        "--derive-prompt-tokens requires --model GGUF --input PROMPTS.jsonl "
+        "--output TOKENS.jsonl --generation-config CONFIG.json "
+        "--generation-config-sha256 SHA256 --input-sha256 SHA256 "
+        "--executable-sha256 SHA256 --producer-git COMMIT "
+        "--producer-tree TREE --tokenizer-artifact-sha256 SHA256 "
+        "--tokenizer-model-file-sha256 SHA256 "
+        "--partition NAME --expected-records N");
+  }
+  if (!IsLowerHex(args.input_sha256, 64) ||
+      !IsLowerHex(args.executable_sha256, 64) ||
+      !IsLowerHex(args.generation_config_sha256, 64) ||
+      !IsLowerHex(args.producer_git, 40) ||
+      !IsLowerHex(args.producer_tree, 40) ||
+      !IsLowerHex(args.tokenizer_model_file_sha256, 64) ||
+      !IsLowerHex(args.tokenizer_artifact_sha256, 64) ||
+      !IsPortableLabel(args.partition)) {
+    throw std::runtime_error(
+        "prompt-token identities or partition label are malformed");
+  }
+  return args;
+}
+
+std::vector<std::int32_t> ExactTokenArray(const gufo::json::Value* value,
+                                          std::string_view field) {
+  if (value == nullptr || !value->is_array() || value->items().empty())
+    throw std::runtime_error(std::string(field) + " is not a non-empty array");
+  std::vector<std::int32_t> result;
+  result.reserve(value->items().size());
+  for (const auto& item : value->items()) {
+    const double number = item.as_double(-1.0);
+    if (!item.is_number() || !std::isfinite(number) || number < 0.0 ||
+        number >
+            static_cast<double>(std::numeric_limits<std::int32_t>::max()) ||
+        number != static_cast<double>(static_cast<std::int32_t>(number))) {
+      throw std::runtime_error(std::string(field) + " has an invalid token");
+    }
+    result.push_back(static_cast<std::int32_t>(number));
+  }
+  return result;
+}
+
+int DerivePromptTokens(int argc, char** argv) {
+  const PromptTokenArguments args = ParsePromptTokenArguments(argc, argv);
+  const auto partial = std::filesystem::path(args.output.string() + ".partial");
+  if (std::filesystem::exists(args.output) ||
+      std::filesystem::is_symlink(args.output) ||
+      std::filesystem::exists(partial) ||
+      std::filesystem::is_symlink(partial)) {
+    throw std::runtime_error("refusing to overwrite prompt-token export");
+  }
+  if (!EndsWithNewline(args.input))
+    throw std::runtime_error(
+        "prompt source must be non-empty and newline-terminated");
+  const GenerationConfig config = ParseGenerationConfig(
+      args.generation_config, args.generation_config_sha256);
+  const std::string source_sha256 = gufo::crypto::Sha256FileHex(args.input);
+  const std::string executable_sha256 =
+      gufo::crypto::Sha256FileHex(ExecutablePath());
+  if (source_sha256 != args.input_sha256)
+    throw std::runtime_error("prompt source identity differs");
+  if (executable_sha256 != args.executable_sha256)
+    throw std::runtime_error("prompt-token executable identity differs");
+  const std::string model_file_sha256 = gufo::crypto::Sha256FileHex(args.model);
+  if (model_file_sha256 != args.tokenizer_model_file_sha256)
+    throw std::runtime_error("tokenizer model-file identity differs");
+
+  std::string error;
+  auto reader = gufo::core::GgufReader::OpenFile(args.model, &error);
+  if (!reader)
+    throw std::runtime_error("model metadata load failed: " + error);
+  auto chat_template =
+      gufo::tokenization::QwenChatTemplate::CreateFromGguf(*reader, &error);
+  if (!chat_template)
+    throw std::runtime_error("chat template load failed: " + error);
+  if (chat_template->GetTemplateSha256() != config.chat_template_sha256)
+    throw std::runtime_error(
+        "model chat template differs from reviewed config");
+  auto tokenizer =
+      gufo::tokenization::QwenTokenizer::CreateFromGguf(*reader, &error);
+  if (!tokenizer)
+    throw std::runtime_error("model tokenizer load failed: " + error);
+
+  std::ifstream source(args.input, std::ios::binary);
+  if (!source)
+    throw std::runtime_error("cannot open prompt source");
+  DurableOutput output(partial, false);
+  std::unordered_set<std::string> ids;
+  std::size_t records = 0;
+  std::size_t prompt_tokens = 0;
+  std::string line;
+  while (std::getline(source, line)) {
+    if (line.empty() || line.size() > kMaxJsonLineBytes)
+      throw std::runtime_error("prompt source row is empty or too large");
+    PromptRecord record = ParsePromptRecord(gufo::json::parse(line));
+    if (!ids.insert(record.id).second)
+      throw std::runtime_error("prompt source repeats id " + record.id);
+    const auto tokens =
+        RenderPrompt(*tokenizer, tokenizer->GetVocabSize(), record, config);
+    const std::string output_line = PromptTokenLine(
+        record, tokens, config, source_sha256, executable_sha256,
+        args.producer_git, args.producer_tree, model_file_sha256,
+        args.tokenizer_artifact_sha256, args.partition);
+    if (output_line.size() > kMaxJsonLineBytes)
+      throw std::runtime_error("prompt-token row exceeds 16 MiB");
+    output.Commit(output_line);
+    prompt_tokens += tokens.size();
+    ++records;
+  }
+  if (!source.eof())
+    throw std::runtime_error("prompt source read failed");
+  if (records != args.expected_records)
+    throw std::runtime_error(
+        "prompt source record count differs from expected");
+  if (gufo::crypto::Sha256FileHex(args.input) != source_sha256 ||
+      gufo::crypto::Sha256FileHex(ExecutablePath()) != executable_sha256 ||
+      gufo::crypto::Sha256FileHex(args.model) != model_file_sha256)
+    throw std::runtime_error(
+        "prompt source, executable or tokenizer model changed during export");
+  output.Close();
+  PublishNoReplace(partial, args.output);
+  std::printf(
+      "FLASHMAP_PROMPT_TOKENS_OK records=%zu tokens=%zu partition=%s "
+      "source=%s tokenizer_artifact=%s executable=%s producer_git=%s "
+      "producer_tree=%s generation_config=%s chat_template=%s sha256=%s "
+      "output=%s\n",
+      records, prompt_tokens, args.partition.c_str(), source_sha256.c_str(),
+      args.tokenizer_artifact_sha256.c_str(), executable_sha256.c_str(),
+      args.producer_git.c_str(), args.producer_tree.c_str(),
+      config.sha256.c_str(), config.chat_template_sha256.c_str(),
+      gufo::crypto::Sha256FileHex(args.output).c_str(),
+      args.output.string().c_str());
+  return 0;
+}
+
+struct ParityArguments {
+  std::filesystem::path token_input;
+  std::filesystem::path response_output;
+  std::string token_input_sha256;
+  std::string response_output_sha256;
+  std::size_t expected_records{};
+};
+
+ParityArguments ParseParityArguments(int argc, char** argv) {
+  ParityArguments args;
+  for (int index = 2; index < argc; ++index) {
+    if (index + 1 >= argc)
+      throw std::runtime_error("missing parity option value");
+    const std::string_view option = argv[index];
+    const std::string value = argv[++index];
+    if (option == "--token-input")
+      args.token_input = value;
+    else if (option == "--token-input-sha256")
+      args.token_input_sha256 = value;
+    else if (option == "--response-output")
+      args.response_output = value;
+    else if (option == "--response-output-sha256")
+      args.response_output_sha256 = value;
+    else if (option == "--expected-records")
+      args.expected_records = std::stoull(value);
+    else
+      throw std::runtime_error("unknown parity option: " + std::string(option));
+  }
+  if (args.token_input.empty() || args.response_output.empty() ||
+      !IsLowerHex(args.token_input_sha256, 64) ||
+      !IsLowerHex(args.response_output_sha256, 64) ||
+      args.expected_records == 0) {
+    throw std::runtime_error(
+        "--verify-prompt-token-parity requires --token-input TOKENS.jsonl "
+        "--token-input-sha256 SHA256 --response-output RESPONSES.jsonl "
+        "--response-output-sha256 SHA256 --expected-records N");
+  }
+  return args;
+}
+
+int VerifyPromptTokenParity(int argc, char** argv) {
+  const ParityArguments args = ParseParityArguments(argc, argv);
+  if (!EndsWithNewline(args.token_input) ||
+      !EndsWithNewline(args.response_output))
+    throw std::runtime_error("parity inputs must be newline-terminated");
+  if (gufo::crypto::Sha256FileHex(args.token_input) !=
+          args.token_input_sha256 ||
+      gufo::crypto::Sha256FileHex(args.response_output) !=
+          args.response_output_sha256)
+    throw std::runtime_error("parity input identity differs");
+  std::ifstream token_input(args.token_input, std::ios::binary);
+  std::ifstream responses(args.response_output, std::ios::binary);
+  if (!token_input || !responses)
+    throw std::runtime_error("cannot open parity inputs");
+  std::size_t records = 0;
+  std::string token_line;
+  std::string response_line;
+  while (std::getline(token_input, token_line)) {
+    if (!std::getline(responses, response_line))
+      throw std::runtime_error("response output has fewer rows");
+    if (token_line.empty() || response_line.empty() ||
+        token_line.size() > kMaxJsonLineBytes ||
+        response_line.size() > kMaxJsonLineBytes)
+      throw std::runtime_error("parity row is empty or too large");
+    const auto token_value = gufo::json::parse(token_line);
+    constexpr std::array<std::string_view, 4> token_keys{
+        "id", "metadata", "prompt_tokens", "source_id"};
+    RequireKeys(token_value, token_keys, "prompt-token row");
+    if (CanonicalJson(token_value) != token_line)
+      throw std::runtime_error("prompt-token row is not canonical JSON");
+    const auto response_value = gufo::json::parse(response_line);
+    const auto* token_id = token_value.find("id");
+    const auto* token_source = token_value.find("source_id");
+    const auto* response_id = response_value.find("id");
+    const auto* response_source = response_value.find("source_id");
+    if (token_id == nullptr || !token_id->is_string() ||
+        token_source == nullptr || !token_source->is_string() ||
+        response_id == nullptr || !response_id->is_string() ||
+        response_source == nullptr || !response_source->is_string() ||
+        token_id->str() != response_id->str() ||
+        token_source->str() != response_source->str())
+      throw std::runtime_error("parity row identity differs");
+    if (ExactTokenArray(token_value.find("prompt_tokens"),
+                        "derived prompt_tokens") !=
+        ExactTokenArray(response_value.find("prompt_tokens"),
+                        "response prompt_tokens"))
+      throw std::runtime_error("prompt token parity differs at row " +
+                               std::to_string(records));
+
+    const auto* token_metadata = token_value.find("metadata");
+    const auto* response_metadata = response_value.find("metadata");
+    if (token_metadata == nullptr || !token_metadata->is_object() ||
+        response_metadata == nullptr || !response_metadata->is_object())
+      throw std::runtime_error("parity row metadata is invalid");
+    for (const std::string_view key :
+         {"prompt_source_file_sha256", "prompt_source_record_sha256",
+          "user_metadata"}) {
+      const std::string owned_key(key);
+      const auto* left = token_metadata->find(owned_key);
+      const auto* right = response_metadata->find(owned_key);
+      if (left == nullptr || right == nullptr ||
+          CanonicalJson(*left) != CanonicalJson(*right))
+        throw std::runtime_error("parity metadata differs for " +
+                                 std::string(key));
+    }
+    ++records;
+  }
+  if (!token_input.eof())
+    throw std::runtime_error("prompt-token input read failed");
+  if (std::getline(responses, response_line) || !responses.eof())
+    throw std::runtime_error("response output has extra rows or read failed");
+  if (records != args.expected_records)
+    throw std::runtime_error("parity record count differs from expected");
+  std::printf(
+      "FLASHMAP_PROMPT_TOKEN_PARITY_OK records=%zu token_input=%s "
+      "response_output=%s\n",
+      records, args.token_input_sha256.c_str(),
+      args.response_output_sha256.c_str());
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
+    if (argc > 1 && std::string_view(argv[1]) == "--derive-prompt-tokens")
+      return DerivePromptTokens(argc, argv);
+    if (argc > 1 && std::string_view(argv[1]) == "--verify-prompt-token-parity")
+      return VerifyPromptTokenParity(argc, argv);
     if (argc == 7 && std::string_view(argv[1]) == "--self-test-output" &&
         std::string_view(argv[3]) == "--generation-config" &&
         std::string_view(argv[5]) == "--generation-config-sha256") {
@@ -712,8 +1069,8 @@ int main(int argc, char** argv) {
         PromptRecord record = ParsePromptRecord(gufo::json::parse(line));
         if (!ids.insert(record.id).second)
           throw std::runtime_error("prompt source repeats id " + record.id);
-        const auto tokens = RenderPrompt(*tokenizer, tokenizer->GetVocabSize(),
-                                         record, config);
+        const auto tokens =
+            RenderPrompt(*tokenizer, tokenizer->GetVocabSize(), record, config);
         if (tokens.size() > max_prompt_tokens) {
           max_prompt_tokens = tokens.size();
           max_prompt_id = record.id;

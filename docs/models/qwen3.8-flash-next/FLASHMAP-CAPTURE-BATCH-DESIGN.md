@@ -91,3 +91,29 @@ No cross-record executor change should ship until that fixture passes on both
 the production `gfx1151` path and the intended `gfx942` cloud producer.  The
 resident-process optimization does not depend on this riskier arithmetic
 change and should be completed first.
+
+## Resident implementation
+
+`flashmap_5k_orchestrate.py capture --resident-capture` now publishes a
+canonical, digest-named job manifest and starts one capture process for the
+entire first contiguous run of missing shards.  `--max-new-shards` can bound
+that run.  The manifest binds the exact input bytes and SHA-256, output path,
+shard ordinal, record range, record/token totals, expected GFM byte count,
+target identity, capture executable identity and Git commit, feature ABI, and
+maximum context.
+
+The capture executable preflights every input and requires every output shard
+directory to be absent before initializing HIP or loading the model.  It loads
+the model once, then calls the unchanged single-record
+`CaptureFlashMapFeatures` path and unchanged GFM serializer for each job.  Each
+shard is durably published without replacement and independently revalidated
+by the orchestrator before success is reported.  Input identity, totals, byte
+count, and exclusive partial-directory ownership are rechecked before each
+publication.
+
+Resident mode deliberately rejects an existing partial.  Recover that one
+shard with the existing single-shard `--retry-partial-shard` path, normally
+bounded by `--max-new-shards 1`, and then resume resident mode.  Previously
+published shards and the active partial remain untouched after any failure.
+This keeps recovery compatible with the proven per-shard validator without
+adding a second partial-resume implementation to the long-lived process.

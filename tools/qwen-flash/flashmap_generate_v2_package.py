@@ -317,7 +317,8 @@ def validate_package(manifest_path: Path, expected_sha256: str | None = None) ->
 
 def response_rows(manifest: dict[str, Any], manifest_path: Path,
                   responses: Path, shard: dict[str, Any], *,
-                  partial: bool, completion_partial: bool = False) -> list[bytes]:
+                  partial: bool, completion_partial: bool = False,
+                  require_completion: bool = True) -> list[bytes]:
     suffix = ".partial" if partial else ""
     path = responses / (shard["response_file"] + suffix)
     if path.is_symlink() or not path.is_file():
@@ -326,7 +327,7 @@ def response_rows(manifest: dict[str, Any], manifest_path: Path,
     expected = shard["end"] - shard["start"]
     if len(lines) > expected or (not partial and len(lines) != expected):
         raise PackageError("response shard row count differs")
-    if not partial:
+    if not partial and require_completion:
         validate_completion_receipt(
             manifest,
             manifest_path,
@@ -408,6 +409,33 @@ def validate_response_inventory(manifest: dict[str, Any], responses: Path,
             receipt = responses / (shard["response_file"] + ".complete.json")
             if not final.is_file() or not receipt.is_file():
                 raise PackageError("response shard or completion receipt is absent")
+
+
+def resume_rows(manifest: dict[str, Any], manifest_path: Path,
+                responses: Path,
+                shard: dict[str, Any]) -> tuple[str, list[bytes]]:
+    final = responses / shard["response_file"]
+    partial = Path(str(final) + ".partial")
+    completion = responses / (shard["response_file"] + ".complete.json")
+    completion_partial = Path(str(completion) + ".partial")
+    if final.exists():
+        has_completion = completion.exists()
+        has_completion_partial = completion_partial.exists()
+        rows = response_rows(
+            manifest,
+            manifest_path,
+            responses,
+            shard,
+            partial=False,
+            completion_partial=has_completion_partial,
+            require_completion=has_completion or has_completion_partial,
+        )
+        return ("sealed" if has_completion else "repair-required"), rows
+    if partial.exists():
+        return "partial", response_rows(
+            manifest, manifest_path, responses, shard, partial=True
+        )
+    return "empty", []
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -545,27 +573,10 @@ def parser() -> argparse.ArgumentParser:
         if args.shard_index < 0 or args.shard_index >= len(manifest["shards"]):
             raise PackageError("shard index is outside the manifest")
         shard = manifest["shards"][args.shard_index]
-        final = args.responses / shard["response_file"]
-        partial = Path(str(final) + ".partial")
-        receipt_partial = args.responses / (
-            shard["response_file"] + ".complete.json.partial"
+        state, rows = resume_rows(
+            manifest, args.manifest, args.responses, shard
         )
-        if final.exists():
-            rows = response_rows(
-                manifest,
-                args.manifest,
-                args.responses,
-                shard,
-                partial=False,
-                completion_partial=receipt_partial.exists(),
-            )
-        elif partial.exists():
-            rows = response_rows(
-                manifest, args.manifest, args.responses, shard, partial=True
-            )
-        else:
-            rows = []
-        print(f"FLASHMAP_V2_RESUME_VALID rows={len(rows)}")
+        print(f"FLASHMAP_V2_RESUME_VALID state={state} rows={len(rows)}")
     resume.set_defaults(run=run_resume)
     combine = sub.add_parser("merge")
     combine.add_argument("manifest", type=Path)

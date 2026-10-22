@@ -84,4 +84,9 @@ if (ENGINE_ENABLE_HIP)
     flashmap_capture_probe.cpp)
   target_link_libraries(qwen38_flash_next_flashmap_capture_probe PRIVATE
     gufo_qwen38_flash_next)
+
+  add_executable(qwen38_flash_next_flashmap_verify_probe EXCLUDE_FROM_ALL
+    flashmap_verify_probe.cpp)
+  target_link_libraries(qwen38_flash_next_flashmap_verify_probe PRIVATE
+    gufo_qwen38_flash_next)
 endif()

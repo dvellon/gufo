@@ -167,11 +167,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   rocm::Executor::Options exec;
   exec.max_batch = m->PrefillThroughCapacity();
-  exec.max_logit_rows =
-      m->mtp_weights_
-          ? static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
-          : 1;
+  // Exact verification is also used by target-bound external drafters. Keep
+  // its bounded target rows available even when no MTP sidecar is loaded.
+  exec.max_logit_rows = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      exec.max_batch,
+      std::uint64_t{std::min(options.max_draft_tokens, kMaxMtpDraftTokens)} +
+          1));
   exec.max_speculative = exec.max_logit_rows;
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
@@ -279,6 +280,18 @@ std::size_t Model::SessionBytes(core::SessionMode mode,
                                  mode == core::SessionMode::kSpeculative
                                      ? executor_->max_speculative() - 1
                                      : 0) +
+         vision;
+}
+
+std::size_t Model::ExternalDraftSessionBytes(
+    std::uint32_t context) const noexcept {
+  const std::size_t vision =
+      vision_ ? std::size_t{context} * (config().hidden_size * sizeof(float) +
+                                        3 * sizeof(std::int32_t)) +
+                    64
+              : 0;
+  return executor_->SessionBytes(core::SessionMode::kAutoregressive, context,
+                                 executor_->max_speculative() - 1) +
          vision;
 }
 
@@ -926,6 +939,10 @@ struct Session::PendingDecode {
   bool sampled{false};
   bool gpu_greedy{false};
   bool gpu_verification{false};
+  /// The deterministic proposals came from a target-bound external drafter.
+  /// It does not score proposals or adapt the MTP policy. An MTP-enabled
+  /// session may still rewind its predictor frontier for a later MTP cycle.
+  bool external_draft{false};
   std::size_t width{0};
   std::optional<sampling::SamplerState> draft_sampler;
   std::uint64_t draft_rng{0};
@@ -1282,25 +1299,30 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // drafts: a copy that ended drafting early would otherwise make a perfect
   // chain look short, and the controller would probe shallower afterwards. A
   // rejected copy says nothing about the MTP head, so it is not a failure.
-  const std::uint32_t mtp_drafts = k - 1 - pending.lookup;
+  const std::uint32_t mtp_drafts =
+      pending.external_draft ? 0 : k - 1 - pending.lookup;
   const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
   stats_.lookup += pending.lookup;
-  stats_.lookup_accepted += keep - 1 - mtp_accepted;
+  if (pending.lookup != 0)
+    stats_.lookup_accepted += keep - 1 - mtp_accepted;
   if (pending.lookup != 0) {
     lookup_.Observe(pending.lookup_start, pending.lookup,
                     keep - 1 - mtp_accepted);
   }
-  const bool mtp_all = mtp_accepted == mtp_drafts;
-  const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
-  // A target stop ends the request; it does not classify the remaining
-  // proposals as failed predictions.
-  draft_length_.Observe(observed,
-                        result->stop || mtp_all ? observed : mtp_drafts, base,
-                        pending.policy_concurrency);
+  if (!pending.external_draft) {
+    const bool mtp_all = mtp_accepted == mtp_drafts;
+    const std::uint32_t observed = mtp_all ? keep - 1 : mtp_accepted;
+    // A target stop ends the request; it does not classify the remaining
+    // proposals as failed predictions.
+    draft_length_.Observe(observed,
+                          result->stop || mtp_all ? observed : mtp_drafts,
+                          base, pending.policy_concurrency);
+  }
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.
-  exec.MtpRewind(*session_, base);
+  if (MtpEnabled())
+    exec.MtpRewind(*session_, base);
   if (correction) {
     // Evaluate the residual as the next cycle's anchor, avoiding a separate
     // target pass. Preserve the actual draw: resampling p would be biased.
@@ -1343,6 +1365,88 @@ bool Session::DecodeStep(std::size_t max_tokens,
           error_msg)) {
     return false;
   }
+  const bool ok = FinishDecode(request, pending, error_msg);
+  valid_ = ok;
+  return ok;
+}
+
+bool Session::DecodeDraftStep(std::size_t max_tokens,
+                              std::span<const std::int32_t> drafts,
+                              sampling::SamplerState& sampler,
+                              DecodeResult* result, std::string* error_msg,
+                              bool stop_at_eos) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeExecution();
+  if (!valid_) {
+    AssignError(error_msg,
+                "session needs a successful Sync after a failed operation");
+    return false;
+  }
+  if (result == nullptr || max_tokens == 0 || tokens_.empty()) {
+    AssignError(
+        error_msg,
+        "draft verification needs an output, a positive budget and a synced prompt");
+    return false;
+  }
+  if (sampler.config().uses_random_sampling()) {
+    AssignError(error_msg,
+                "external draft verification currently requires greedy sampling");
+    return false;
+  }
+  auto& exec = *model_->executor_;
+  const std::size_t room = ContextSize() - tokens_.size();
+  const std::size_t cap =
+      std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
+  if (drafts.size() > exec.max_speculative() - 1) {
+    AssignError(error_msg, "external draft exceeds the verification limit");
+    return false;
+  }
+  for (const auto token : drafts) {
+    if (token < 0 || static_cast<std::uint32_t>(token) >= model_->VocabSize()) {
+      AssignError(error_msg, "external draft token is out of range");
+      return false;
+    }
+  }
+
+  *result = {};
+  if (cap == 0) {
+    result->stop = true;
+    return true;
+  }
+  const auto is_stop = [&](std::int32_t token) {
+    return stop_at_eos && model_->IsStopToken(token);
+  };
+  const auto anchor = static_cast<std::int32_t>(sampler.Sample(logits_));
+  if (is_stop(anchor)) {
+    result->stop = true;
+    return true;
+  }
+
+  PendingDecode pending;
+  pending.base = static_cast<std::uint32_t>(tokens_.size());
+  pending.chain.push_back(anchor);
+  for (const auto token : drafts.first(std::min(drafts.size(), cap - 1))) {
+    pending.chain.push_back(token);
+    if (is_stop(token))
+      break;
+  }
+  pending.width = pending.chain.size();
+  pending.speculative = pending.chain.size() > 1;
+  pending.external_draft = pending.speculative;
+  if (pending.speculative) {
+    verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
+  }
+
+  valid_ = false;
+  float* logits = pending.speculative ? verify_logits_.data() : logits_.data();
+  if (!exec.Forward(*session_, pending.chain, pending.chain.size(), logits,
+                    pending.speculative
+                        ? rocm::Executor::ForwardMode::kVerify
+                        : rocm::Executor::ForwardMode::kDecode,
+                    error_msg)) {
+    return false;
+  }
+  const DecodeRequest request{this, max_tokens, &sampler, result, stop_at_eos};
   const bool ok = FinishDecode(request, pending, error_msg);
   valid_ = ok;
   return ok;

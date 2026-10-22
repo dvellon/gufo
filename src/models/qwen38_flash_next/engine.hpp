@@ -99,6 +99,11 @@ public:
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
+  /// Admission bound for an autoregressive session that may call
+  /// DecodeDraftStep. It includes the lazily allocated target rollback rows
+  /// without charging ordinary one-token autoregressive sessions for them.
+  [[nodiscard]] std::size_t ExternalDraftSessionBytes(
+      std::uint32_t context) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Runs a fresh target-only prompt and exports FlashMap conditioning rows.
   /// Layer IDs are zero-based completed decoder layers, sorted and unique.
@@ -184,6 +189,15 @@ public:
                                 std::string* error_msg = nullptr,
                                 bool stop_at_eos = true,
                                 std::uint32_t occupancy = 1);
+  /// Verifies an externally produced deterministic draft with the exact target.
+  /// The target still selects the first (anchor) token from the current logits;
+  /// `drafts` contains only the tokens after that anchor. The target commits
+  /// the longest matching prefix and leaves `logits()` at the next ordinary
+  /// decode distribution. This path does not require or execute an MTP model.
+  [[nodiscard]] bool DecodeDraftStep(
+      std::size_t max_tokens, std::span<const std::int32_t> drafts,
+      sampling::SamplerState& sampler, DecodeResult* result,
+      std::string* error_msg = nullptr, bool stop_at_eos = true);
   struct BatchOutcome {
     bool completed{false};
     std::string error{};

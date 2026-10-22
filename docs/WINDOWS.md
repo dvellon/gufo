@@ -13,7 +13,7 @@ experimental; see [Native AMD ROCm 7.2 SDK](#native-amd-rocm-72-sdk).
 | --- | --- | --- |
 | TheRock ROCm 10.1.0 (Windows, gfx1151) | active Python environment | Install AMD's official `rocm[devel,libraries,device-gfx1151]==10.1.0` wheels and run `rocm-sdk init`; `rocm-sdk path --root` locates the toolchain. Its clang compiles C, C++ and HIP |
 | AMD display driver | system | Adrenalin for ROCm 10.1, driver-store `32.0.31041.5005` or newer. Older 31041 drivers can crash in `hipProfilerRegisterChunkCallbackExt` before the first kernel runs |
-| vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo libwebp pkgconf --triplet x64-windows` |
+| vcpkg | `C:\vcpkg` | `vcpkg install icu curl openssl libpng libjpeg-turbo libwebp --triplet x64-windows` |
 | Visual Studio Build Tools | any | "Desktop development with C++": MSVC STL + Windows SDK only; tested with VS 18 (MSVC 14.51) |
 | CMake 3.21-3.31 and Ninja | active Python environment or `PATH` | 3.31.6 is validated; CMake 4.x currently mis-escapes the wheel toolchain's Windows paths |
 | Dedicated GPU memory | AMD Software > Performance > Tuning > Variable Graphics Memory | 96 GB for Qwen3.8-Flash-Next at 256K context; see [Memory](#memory) |
@@ -82,12 +82,13 @@ the script from PowerShell so the array remains typed:
   -Reconfigure
 ```
 
-The native 7.2 path currently reaches CMake configuration with AMD clang 21
-and the vcpkg dependencies. It has not yet produced or passed the qualified
-Gufo target and model/operator/performance tests; the current validation host
-stops at its missing host `pkg-config` executable. Install or expose that host
-tool before expecting configuration to complete. TheRock 10.1.0 remains the
-qualified Windows toolchain described by the rest of this document.
+The native 7.2 path configures with AMD clang 21 and builds the
+`gufo_qwen38_flash_next` library plus the FlashMap capture and target-verifier
+executables for gfx1151. Windows resolves WebP through vcpkg's native
+`WebP::webp` CMake package, so a separate host `pkg-config` executable is not
+required. Real-model operator, equivalence, and performance qualification is
+still pending; TheRock 10.1.0 remains the qualified Windows toolchain
+described by the rest of this document.
 
 ## Running Qwen3.8-Flash-Next
 

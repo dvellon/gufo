@@ -5,7 +5,7 @@
 #   - ROCm 10.1.0 for Windows gfx1151 from AMD's official Python wheels;
 #     activate that environment and run `rocm-sdk init` once.
 #   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo
-#     libwebp pkgconf (x64-windows)
+#     libwebp (x64-windows)
 #   - Visual Studio Build Tools (MSVC STL + Windows SDK; the compiler is TheRock clang)
 #   - CMake 3.21+, and ninja on PATH or at C:\tools\ninja\ninja.exe
 #

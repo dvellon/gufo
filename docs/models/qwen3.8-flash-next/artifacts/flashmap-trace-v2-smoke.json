@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-22",
+  "status": "passed",
+  "scope": "offline FlashMap target-feature capture and independent trace validation",
+  "target_artifact_sha256": "bdf8425b3453aacfa4f247e94c13abeb98c4356120c39da2fa60b90b5a7116a9",
+  "feature_abi_sha256": "70c629737b587777b4955b454744b8009ffc23901b97c252d8306a9375f66d7c",
+  "producer_executable_sha256": "cbe63b81782b3f2f5c2baaf43d73fc02079eaa67695fb788b4784a79f44b5328",
+  "producer_git_commit": "1f2ed2fab7dd4cac704d2e1c01222c482343b445",
+  "published_trace_sha256": "baf5aa91e348c1ffc6e9aed4d62d78b30e5b1acc679d5f8a666670d8f721feb1",
+  "independent_reader_sha256": "a5821af5e6862f5351511850fa304d177e5c52a4198c3a97f325b2137d143e2d",
+  "shape": {
+    "records": 2,
+    "tokens": 11,
+    "taps": [1, 12, 23, 34, 45, 47],
+    "hidden": 2560,
+    "storage": "BF16 round-to-nearest-even",
+    "layout": "token,tap,hidden"
+  },
+  "capture_probe": {
+    "tokens": 96,
+    "values": 1474560,
+    "independent_runs_bit_identical": true,
+    "ordinary_final_logits_bit_identical": true
+  },
+  "capacity_capture_probe": {
+    "tokens": 4096,
+    "values": 62914560,
+    "independent_runs_bit_identical": true,
+    "ordinary_final_logits_bit_identical": true
+  },
+  "validation": {
+    "cpp_writer": "passed",
+    "python_mmap_reader": "passed",
+    "speculators_safetensors_import": "passed for both real records",
+    "synthetic_corruption_and_recovery_matrix": "passed",
+    "broad_test_suite_run": false
+  },
+  "notes": [
+    "The first five rows are FlashMap auxiliary conditioning features.",
+    "Layer 47 is stored separately for verifier_last_hidden_states.",
+    "The published .gfm shard remains a local build artifact; this file records its immutable identity and focused evidence."
+  ]
+}

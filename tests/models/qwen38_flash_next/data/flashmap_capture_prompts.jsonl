@@ -1,0 +1,2 @@
+"Implement a bounded ring buffer."
+"Explain why an atomic compare-and-swap must validate its expected value."

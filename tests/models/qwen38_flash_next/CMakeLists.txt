@@ -79,4 +79,9 @@ if (ENGINE_ENABLE_HIP)
     mtp_audit.cpp)
   target_link_libraries(qwen38_flash_next_gpu_probe PRIVATE
     gufo_qwen38_flash_next_reference)
+
+  add_executable(qwen38_flash_next_flashmap_capture_probe EXCLUDE_FROM_ALL
+    flashmap_capture_probe.cpp)
+  target_link_libraries(qwen38_flash_next_flashmap_capture_probe PRIVATE
+    gufo_qwen38_flash_next)
 endif()

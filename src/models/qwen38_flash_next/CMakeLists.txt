@@ -81,6 +81,11 @@ if (ENGINE_ENABLE_HIP)
   endif()
 
   if (GUFO_BUILD_TOOLS OR BUILD_TESTING)
+    add_executable(qwen38_flash_next_flashmap_capture EXCLUDE_FROM_ALL
+      ${PROJECT_SOURCE_DIR}/tools/qwen-flash/flashmap_capture.cpp)
+    target_link_libraries(qwen38_flash_next_flashmap_capture PRIVATE
+      gufo_qwen38_flash_next)
+
     add_executable(qwen38_flash_next_flashmap_generate EXCLUDE_FROM_ALL
       ${PROJECT_SOURCE_DIR}/tools/qwen-flash/flashmap_generate.cpp)
     target_link_libraries(qwen38_flash_next_flashmap_generate PRIVATE

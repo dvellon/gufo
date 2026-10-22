@@ -266,6 +266,15 @@ public:
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
+  /// Offline target-feature capture for a FlashMap training trace. Layer IDs
+  /// are zero-based completed decoder layers, sorted and unique. `features`
+  /// receives tap-major F32 rows: [layer][token][hidden_size]. Each wide
+  /// hyper-connection residual is reduced by the target's own final mixer, so
+  /// the feature width matches the target embedding and output head.
+  struct LayerFeatureCapture {
+    std::span<const std::uint32_t> layer_ids;
+    std::span<float> features;
+  };
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
       Session& session, std::span<const std::int32_t> tokens,
       std::uint32_t prefix, std::string* error_msg) const;
@@ -285,7 +294,8 @@ public:
                              std::uint32_t n_logits, float* logits,
                              ForwardMode mode, std::string* error_msg,
                              PrefillCheckpoint* checkpoint = nullptr,
-                             std::span<const std::int32_t> next = {}) const;
+                             std::span<const std::int32_t> next = {},
+                             LayerFeatureCapture* capture = nullptr) const;
 
   struct BatchItem {
     Session* session;
@@ -573,7 +583,8 @@ private:
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg,
                    PrefillCheckpoint* checkpoint = nullptr,
-                   bool embeddings_ready = false) const;
+                   bool embeddings_ready = false,
+                   LayerFeatureCapture* capture = nullptr) const;
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only,
@@ -717,6 +728,11 @@ private:
   mutable GdnBatchItem* batch_gdn_host_{nullptr};
   mutable GdnBatchItem* batch_gdn_{nullptr};
   mutable std::uint32_t batch_rows_{0};
+  /// Lazily allocated pinned output staging for offline capture only.
+  mutable float* layer_capture_host_{nullptr};
+  /// Raw hyper-connection residual snapshots for the requested taps. Readout
+  /// happens after the untouched target pass completes.
+  mutable float* layer_capture_device_{nullptr};
   mutable const float* selected_logits_{nullptr};
   [[nodiscard]] const float* VerificationLogits() const {
     return selected_logits_ != nullptr ? selected_logits_ : s_.logits;

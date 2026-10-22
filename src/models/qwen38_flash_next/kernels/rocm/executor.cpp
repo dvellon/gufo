@@ -30,6 +30,8 @@ namespace {
 
 using core::GgmlType;
 
+constexpr std::size_t kMaxFlashMapLayerTaps = 6;
+
 void AssignError(std::string* error_msg, const std::string& message) {
   if (error_msg != nullptr) {
     *error_msg = message;
@@ -931,6 +933,7 @@ Executor::~Executor() {
   }
   (void)hipFree(batch_logits_);
   (void)hipFree(verification_penalties_);
+  (void)hipFree(layer_capture_device_);
   for (void* p : allocations_) {
     (void)hipFree(p);
   }
@@ -2976,7 +2979,8 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
 bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
                        std::string* error_msg, PrefillCheckpoint* checkpoint,
-                       std::span<const std::int32_t> next) const {
+                       std::span<const std::int32_t> next,
+                       LayerFeatureCapture* capture) const {
   // Only this call's PLE layer may start the prefetch of `next`.
   struct NextHint {
     std::span<const std::int32_t>& hint;
@@ -2991,6 +2995,45 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   DropReadyQ8();
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
+  if (capture != nullptr) {
+    const auto ids = capture->layer_ids;
+    const std::size_t expected =
+        ids.size() * static_cast<std::size_t>(n) * c.hidden_size;
+    if (mode != ForwardMode::kPrefill || checkpoint != nullptr || ids.empty() ||
+        ids.size() > kMaxFlashMapLayerTaps ||
+        !std::is_sorted(ids.begin(), ids.end()) ||
+        std::adjacent_find(ids.begin(), ids.end()) != ids.end() ||
+        ids.back() >= c.num_layers || capture->features.size() != expected) {
+      AssignError(error_msg, "invalid FlashMap layer-feature capture");
+      return false;
+    }
+    // A capture is a standalone offline pass. It must not consume activation
+    // conversion metadata left by an unrelated session that used the same
+    // scratch addresses.
+    q8t_src_ = nullptr;
+    half_src_ = nullptr;
+    DropReadyQ8();
+    xn_half_ = false;
+    inject_fused_ = nullptr;
+    if (layer_capture_host_ == nullptr) {
+      const std::size_t output_capacity =
+          kMaxFlashMapLayerTaps * options_.max_batch * c.hidden_size;
+      if (!Check(host_allocations_.Allocate(
+                     &layer_capture_host_, output_capacity * sizeof(float)),
+                 "FlashMap feature staging allocation", error_msg)) {
+        return false;
+      }
+    }
+    if (layer_capture_device_ == nullptr) {
+      const std::size_t residual_capacity =
+          kMaxFlashMapLayerTaps * options_.max_batch * c.HcDim();
+      if (!Check(hipMalloc(reinterpret_cast<void**>(&layer_capture_device_),
+                          residual_capacity * sizeof(*layer_capture_device_)),
+                 "FlashMap residual snapshot allocation", error_msg)) {
+        return false;
+      }
+    }
+  }
   if (checkpoint && (mode != ForwardMode::kPrefill ||
                      checkpoint->source != &session || checkpoint->tokens > n ||
                      checkpoint->state->position_ !=
@@ -3088,7 +3131,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   // Decode-sized batches replay as graphs; a pooling backlog (the first
   // batch past the budget) needs the wider eager grid.
   const std::uint32_t graph_pool_grid = n / std::max(c.compress_ratio, 1u) + 1;
-  const bool graph = !prefill_phase && n <= kVecBatch &&
+  const bool graph = capture == nullptr && !prefill_phase && n <= kVecBatch &&
                      pool_grid <= graph_pool_grid &&
                      session.position_ >= session.VisionLayout().PrefixLength();
   const std::uint64_t key = static_cast<std::uint64_t>(n) |
@@ -3104,7 +3147,8 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (first_layer > 0) {
     const auto prefix = [&] {
       return ForwardBody(session, n, 0, false, speculative, sparse, start_pos,
-                         graph_pool_grid, 0, first_layer, error_msg);
+                         graph_pool_grid, 0, first_layer, error_msg, nullptr,
+                         false, capture);
     };
     constexpr std::uint64_t kPrefixKey = std::uint64_t{1} << 35;
     if (!Run(session, key | kPrefixKey, graph, prefix, error_msg, false)) {
@@ -3114,7 +3158,8 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const auto body = [&] {
     return ForwardBody(session, n, n_logits, logits != nullptr, speculative,
                        sparse, start_pos, graph ? graph_pool_grid : pool_grid,
-                       first_layer, c.num_layers, error_msg, checkpoint, graph);
+                       first_layer, c.num_layers, error_msg, checkpoint, graph,
+                       capture);
   };
   // The prefix is already queued. Wait once before the suffix so recording
   // its graph can reuse these pinned rows while the eager pass executes.
@@ -3127,6 +3172,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (n_logits > 0 && logits != nullptr) {
     std::copy_n(logits_host_, static_cast<std::size_t>(n_logits) * c.vocab_size,
                 logits);
+  }
+  if (capture != nullptr) {
+    std::copy_n(layer_capture_host_, capture->features.size(),
+                capture->features.begin());
   }
 
   session.position_ += n;
@@ -3153,7 +3202,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t first_layer, std::uint32_t end_layer,
                            std::string* error_msg,
                            PrefillCheckpoint* checkpoint,
-                           bool embeddings_ready) const {
+                           bool embeddings_ready,
+                           LayerFeatureCapture* capture) const {
   const Config& c = config();
   if (first_layer == 0) {
     if (!Check(hipMemcpyAsync(session.control_, control_host_,
@@ -3192,7 +3242,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     }
     // The last target layer's query outputs have no later cache consumer.
     // Preserve all K/V/indexer rows and the final query's original tile.
-    const bool last_attention = WidePrefill(n) && !session.mtp_enabled_ &&
+    const bool last_attention = capture == nullptr && WidePrefill(n) &&
+                                 !session.mtp_enabled_ &&
                                 il + 1 == c.num_layers && n_logits == 1 &&
                                 checkpoint == nullptr;
     if (l.linear) {
@@ -3227,7 +3278,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     const auto needed =
         std::max({96U, n_logits, checkpoint ? n - checkpoint->tokens + 1 : 0U});
     const auto skipped = prefill_phase && !session.mtp_enabled_ &&
-                                 il + 1 == c.num_layers && n > needed
+                                 capture == nullptr && il + 1 == c.num_layers &&
+                                 n > needed
                              ? (n - needed) / 128 * 128
                              : 0U;
     const auto finish = [&](std::uint32_t rows) {
@@ -3263,6 +3315,21 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       return false;
     }
     normed = next_norm != nullptr;
+    if (capture != nullptr) {
+      const auto found = std::lower_bound(capture->layer_ids.begin(),
+                                          capture->layer_ids.end(), il);
+      if (found != capture->layer_ids.end() && *found == il) {
+        const std::size_t tap =
+            static_cast<std::size_t>(found - capture->layer_ids.begin());
+        if (!Check(hipMemcpyAsync(
+                       layer_capture_device_ + tap * n * c.HcDim(), s_.res,
+                       static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream_),
+                   "FlashMap residual snapshot", error_msg)) {
+          return false;
+        }
+      }
+    }
   }
   if (end_layer < c.num_layers) {
     return true;
@@ -3321,6 +3388,33 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                "logits download", error_msg)) {
       return false;
     }
+  }
+  // The target pass, persistent cache updates and requested logits are now
+  // complete. Only at this point may the offline readout reuse executor
+  // scratch; every raw tap above was a device-to-device observation.
+  if (capture != nullptr) {
+    for (std::size_t tap = 0; tap < capture->layer_ids.size(); ++tap) {
+      q8t_src_ = nullptr;
+      half_src_ = nullptr;
+      DropReadyQ8();
+      xn_half_ = false;
+      inject_fused_ = nullptr;
+      if (!HcMix(model_->hc_head(),
+                 layer_capture_device_ + tap * n * c.HcDim(), false, s_.mixed,
+                 nullptr, n, error_msg) ||
+          !Check(hipMemcpyAsync(
+                     layer_capture_host_ + tap * n * c.hidden_size, s_.mixed,
+                     static_cast<std::size_t>(n) * c.hidden_size * sizeof(float),
+                     hipMemcpyDeviceToHost, stream_),
+                 "FlashMap feature download", error_msg)) {
+        return false;
+      }
+    }
+    q8t_src_ = nullptr;
+    half_src_ = nullptr;
+    DropReadyQ8();
+    xn_half_ = false;
+    inject_fused_ = nullptr;
   }
   return true;
 }

@@ -286,6 +286,78 @@ std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
 }
 
+bool Model::CaptureFlashMapFeatures(
+    std::span<const std::int32_t> tokens,
+    std::span<const std::uint32_t> layer_ids, std::vector<float>* features,
+    std::string* error_msg, std::vector<float>* final_logits) {
+  if (features == nullptr || tokens.empty() ||
+      tokens.size() > options_.max_context) {
+    AssignError(error_msg, "FlashMap capture needs a bounded non-empty prompt");
+    return false;
+  }
+  features->clear();
+  if (final_logits != nullptr)
+    final_logits->clear();
+  auto state = executor_->CreateSession(core::SessionMode::kAutoregressive,
+                                        static_cast<std::uint32_t>(tokens.size()),
+                                        error_msg);
+  if (!state) {
+    return false;
+  }
+  if (vision_) {
+    try {
+      state->PrepareVision(executor_->stream());
+    } catch (const std::exception& exception) {
+      AssignError(error_msg, exception.what());
+      return false;
+    }
+  }
+
+  const std::size_t hidden = config().hidden_size;
+  features->resize(tokens.size() * layer_ids.size() * hidden);
+  for (std::size_t offset = 0; offset < tokens.size();) {
+    const auto remaining = tokens.size() - offset;
+    const auto capacity = remaining <= executor_->max_batch()
+                              ? executor_->max_batch()
+                              : PrefillCapacity();
+    const std::size_t count = std::min<std::size_t>(capacity, remaining);
+    const auto chunk = tokens.subspan(offset, count);
+    const auto rest = tokens.subspan(offset + count);
+    const auto next = rest.first(std::min<std::size_t>(
+        rest.size() <= executor_->max_batch() ? executor_->max_batch()
+                                               : PrefillCapacity(),
+        rest.size()));
+    std::vector<float> tap_major(layer_ids.size() * count * hidden);
+    rocm::Executor::LayerFeatureCapture capture{layer_ids, tap_major};
+    const bool final_chunk = offset + count == tokens.size();
+    std::vector<float> logits;
+    if (final_chunk && final_logits != nullptr)
+      logits.resize(config().vocab_size);
+    if (!executor_->Forward(*state, chunk, logits.empty() ? 0 : 1,
+                            logits.empty() ? nullptr : logits.data(),
+                            rocm::Executor::ForwardMode::kPrefill, error_msg,
+                            nullptr, next, &capture)) {
+      features->clear();
+      if (final_logits != nullptr)
+        final_logits->clear();
+      return false;
+    }
+    if (!logits.empty())
+      *final_logits = std::move(logits);
+    for (std::size_t row = 0; row < count; ++row) {
+      for (std::size_t tap = 0; tap < layer_ids.size(); ++tap) {
+        const float* source =
+            tap_major.data() + (tap * count + row) * hidden;
+        float* destination =
+            features->data() + ((offset + row) * layer_ids.size() + tap) * hidden;
+        std::copy_n(source, hidden, destination);
+      }
+    }
+    offset += count;
+  }
+  return true;
+}
+
 std::size_t Session::AllocatedBytes() const noexcept {
   return session_->AllocatedBytes();
 }

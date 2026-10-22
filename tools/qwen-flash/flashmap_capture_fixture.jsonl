@@ -1,0 +1,2 @@
+{"id":"flashmap-v2-text","source_id":"synthetic-contract","text":"Return the integer 42.","metadata":{"domain":"code","license":"synthetic","split":"contract"}}
+{"id":"flashmap-v2-tokens","source_id":"synthetic-contract","tokens":[1,2,3,4],"metadata":{"domain":"tokens","license":"synthetic","split":"contract"}}

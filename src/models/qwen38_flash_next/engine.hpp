@@ -100,6 +100,16 @@ public:
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  /// Runs a fresh target-only prompt and exports FlashMap conditioning rows.
+  /// Layer IDs are zero-based completed decoder layers, sorted and unique.
+  /// Output is token-major [token][layer][hidden_size] F32. This diagnostic
+  /// path is for target-bound drafter training data and is never entered by
+  /// ordinary inference.
+  [[nodiscard]] bool CaptureFlashMapFeatures(
+      std::span<const std::int32_t> tokens,
+      std::span<const std::uint32_t> layer_ids, std::vector<float>* features,
+      std::string* error_msg = nullptr,
+      std::vector<float>* final_logits = nullptr);
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
       const noexcept {
     return vision_;

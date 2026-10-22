@@ -15,6 +15,8 @@ namespace {
 
 constexpr std::string_view kPackageFormat =
     "gufo.flashmap.exact-target-shards.v2";
+constexpr std::string_view kCompletionFormat =
+    "gufo.flashmap.response-completion.v1";
 
 struct Shard {
   std::size_t index{};
@@ -240,6 +242,87 @@ std::vector<std::string> ReadResponseLines(const std::filesystem::path& path,
   return result;
 }
 
+std::filesystem::path CompletionPath(const std::filesystem::path& output) {
+  return std::filesystem::path(output.string() + ".complete.json");
+}
+
+std::string CompletionPayload(const Shard& shard, const Package& package,
+                              std::string_view manifest_sha256,
+                              std::string_view response_sha256) {
+  std::ostringstream output;
+  output << "{\"decode_width\":" << package.decode_width
+         << ",\"end\":" << shard.end << ",\"format\":\"" << kCompletionFormat
+         << "\",\"manifest_sha256\":\"" << manifest_sha256
+         << "\",\"records\":" << (shard.end - shard.start)
+         << ",\"response_file\":\"" << shard.response_file
+         << "\",\"response_sha256\":\"" << response_sha256
+         << "\",\"runtime_identity\":\"" << package.runtime_identity
+         << "\",\"start\":" << shard.start << "}";
+  return output.str();
+}
+
+bool IsReadOnly(const std::filesystem::path& path) {
+  const auto permissions = std::filesystem::status(path).permissions();
+  using std::filesystem::perms;
+  return (permissions & (perms::owner_write | perms::group_write |
+                         perms::others_write)) == perms::none;
+}
+
+void MakeReadOnly(const std::filesystem::path& path) {
+#ifdef _WIN32
+  if (_wchmod(path.c_str(), _S_IREAD) != 0)
+    throw std::runtime_error(
+        "cannot make completed response artifact read-only");
+#else
+  if (::chmod(path.c_str(), 0444) != 0)
+    throw std::runtime_error(
+        "cannot make completed response artifact read-only");
+#endif
+}
+
+void ValidateCompletion(const std::filesystem::path& output,
+                        const std::filesystem::path& receipt,
+                        const Shard& shard, const Package& package,
+                        std::string_view manifest_sha256) {
+  if (!std::filesystem::is_regular_file(output) ||
+      std::filesystem::is_symlink(output) ||
+      !std::filesystem::is_regular_file(receipt) ||
+      std::filesystem::is_symlink(receipt))
+    throw std::runtime_error("completed response artifact is not regular");
+  const std::string expected =
+      CompletionPayload(shard, package, manifest_sha256,
+                        gufo::crypto::Sha256FileHex(output)) +
+      "\n";
+  if (ReadBounded(receipt, 64 * 1024) != expected)
+    throw std::runtime_error("response completion receipt binding differs");
+  if (!IsReadOnly(output) || !IsReadOnly(receipt))
+    throw std::runtime_error("completed response artifacts must be read-only");
+}
+
+void SealCompletion(const std::filesystem::path& output, const Shard& shard,
+                    const Package& package, std::string_view manifest_sha256) {
+  MakeReadOnly(output);
+  const auto receipt = CompletionPath(output);
+  const auto partial = std::filesystem::path(receipt.string() + ".partial");
+  const std::string payload = CompletionPayload(
+      shard, package, manifest_sha256, gufo::crypto::Sha256FileHex(output));
+  if (std::filesystem::exists(receipt)) {
+    ValidateCompletion(output, receipt, shard, package, manifest_sha256);
+    return;
+  }
+  if (std::filesystem::exists(partial)) {
+    if (ReadBounded(partial, 64 * 1024) != payload + "\n")
+      throw std::runtime_error("partial completion receipt binding differs");
+  } else {
+    DurableOutput sink(partial, false);
+    sink.Commit(payload);
+    sink.Close();
+  }
+  PublishNoReplace(partial, receipt);
+  MakeReadOnly(receipt);
+  ValidateCompletion(output, receipt, shard, package, manifest_sha256);
+}
+
 struct PreparedRecord {
   PromptRecord source;
   std::vector<std::int32_t> prompt;
@@ -389,6 +472,9 @@ int main(int argc, char** argv) {
     for (const auto& shard : package.shards) {
       allowed_response_files.insert(shard.response_file);
       allowed_response_files.insert(shard.response_file + ".partial");
+      allowed_response_files.insert(shard.response_file + ".complete.json");
+      allowed_response_files.insert(shard.response_file +
+                                    ".complete.json.partial");
     }
     for (const auto& entry :
          std::filesystem::directory_iterator(args.responses)) {
@@ -462,12 +548,25 @@ int main(int argc, char** argv) {
           package_directory / shard.prompt_file, shard, &ids, nullptr);
       const auto output = args.responses / shard.response_file;
       const auto partial = std::filesystem::path(output.string() + ".partial");
+      const auto receipt = CompletionPath(output);
+      const auto receipt_partial =
+          std::filesystem::path(receipt.string() + ".partial");
       if (std::filesystem::is_symlink(output) ||
           std::filesystem::is_symlink(partial) ||
+          std::filesystem::is_symlink(receipt) ||
+          std::filesystem::is_symlink(receipt_partial) ||
           (std::filesystem::exists(output) && std::filesystem::exists(partial)))
         throw std::runtime_error("response shard state is ambiguous");
-      if (!args.resume &&
-          (std::filesystem::exists(output) || std::filesystem::exists(partial)))
+      if ((std::filesystem::exists(receipt) &&
+           (!std::filesystem::exists(output) ||
+            std::filesystem::exists(receipt_partial))) ||
+          (std::filesystem::exists(receipt_partial) &&
+           !std::filesystem::exists(output)))
+        throw std::runtime_error("response completion state is ambiguous");
+      if (!args.resume && (std::filesystem::exists(output) ||
+                           std::filesystem::exists(partial) ||
+                           std::filesystem::exists(receipt) ||
+                           std::filesystem::exists(receipt_partial)))
         throw std::runtime_error("response shard exists; use --resume");
 
       const bool complete = std::filesystem::exists(output);
@@ -492,13 +591,16 @@ int main(int argc, char** argv) {
         prepared.push_back(std::move(item));
       }
       resumed += existing.size();
-      if (complete)
+      if (complete && std::filesystem::exists(receipt)) {
+        ValidateCompletion(output, receipt, shard, package,
+                           args.manifest_sha256);
         continue;
+      }
 
-      DurableOutput sink(partial, has_partial);
-      const std::size_t first_cohort =
-          (existing.size() / package.decode_width) * package.decode_width;
-      for (std::size_t start = first_cohort; start < prepared.size();
+      std::unique_ptr<DurableOutput> sink;
+      if (!complete)
+        sink = std::make_unique<DurableOutput>(partial, has_partial);
+      for (std::size_t start = 0; start < prepared.size();
            start += package.decode_width) {
         const std::size_t end =
             std::min(prepared.size(), start + package.decode_width);
@@ -516,7 +618,7 @@ int main(int argc, char** argv) {
           }
           if (lines[i].size() > kMaxJsonLineBytes)
             throw std::runtime_error("response row exceeds 16 MiB");
-          sink.Commit(lines[i]);
+          sink->Commit(lines[i]);
           ++generated;
           std::fprintf(stderr,
                        "FLASHMAP_V2_RESPONSE_COMMITTED ordinal=%zu "
@@ -524,8 +626,11 @@ int main(int argc, char** argv) {
                        shard.start + local, shard.start + start, cohort.size());
         }
       }
-      sink.Close();
-      PublishNoReplace(partial, output);
+      if (!complete) {
+        sink->Close();
+        PublishNoReplace(partial, output);
+      }
+      SealCompletion(output, shard, package, args.manifest_sha256);
     }
     std::printf(
         "FLASHMAP_V2_RESPONSES_OK records=%zu resumed=%zu generated=%zu "

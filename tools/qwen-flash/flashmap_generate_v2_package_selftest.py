@@ -104,7 +104,18 @@ def main() -> int:
         for shard in manifest["shards"]:
             rows = [package.canonical(response(prompts[index], index))
                     for index in range(shard["start"], shard["end"])]
-            (responses / shard["response_file"]).write_bytes(b"".join(rows))
+            response_path = responses / shard["response_file"]
+            response_path.write_bytes(b"".join(rows))
+            response_path.chmod(0o444)
+            package.write_exclusive(
+                responses / (shard["response_file"] + ".complete.json"),
+                package.completion_payload(
+                    manifest_sha,
+                    manifest,
+                    shard,
+                    package.digest_file(response_path),
+                ),
+            )
             assert len(package.response_rows(manifest, manifest_path, responses,
                                              shard, partial=False)) == len(rows)
 
@@ -122,6 +133,10 @@ def main() -> int:
         first = manifest["shards"][0]
         complete = responses / first["response_file"]
         partial = Path(str(complete) + ".partial")
+        partial.write_bytes(b"")
+        assert package.response_rows(
+            manifest, manifest_path, responses, first, partial=True
+        ) == []
         partial.write_bytes(complete.read_bytes().splitlines(keepends=True)[0])
         assert len(package.response_rows(manifest, manifest_path, responses,
                                          first, partial=True)) == 1
@@ -131,6 +146,21 @@ def main() -> int:
             manifest, manifest_path, responses, first, partial=True),
             "identity differs")
         partial.unlink()
+
+        complete.chmod(0o600)
+        expect_failure(lambda: package.response_rows(
+            manifest, manifest_path, responses, first, partial=False),
+            "read-only")
+        complete.chmod(0o444)
+        receipt = responses / (first["response_file"] + ".complete.json")
+        receipt.chmod(0o600)
+        receipt.write_bytes(receipt.read_bytes().replace(
+            package.digest_file(complete).encode("ascii"), b"f" * 64
+        ))
+        receipt.chmod(0o444)
+        expect_failure(lambda: package.response_rows(
+            manifest, manifest_path, responses, first, partial=False),
+            "binding differs")
 
         unexpected = responses / "not-in-manifest.txt"
         unexpected.write_text("unexpected\n", encoding="utf-8")

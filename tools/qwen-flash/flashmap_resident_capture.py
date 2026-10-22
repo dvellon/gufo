@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from typing import Any, Iterable
+
+import flashmap_5k_plan as planner
 
 if os.name == "nt":
     import ctypes
@@ -100,6 +104,7 @@ def build_manifest(
     seen_outputs: set[Path] = set()
     seen_ordinals: set[int] = set()
     next_index: int | None = None
+    next_ordinal: int | None = None
     for shard in shards:
         ordinal = _integer(shard.get("shard_ordinal"), "shard ordinal")
         first_index = _integer(shard.get("first_index"), "first index")
@@ -115,7 +120,10 @@ def build_manifest(
             raise ResidentCaptureError("shard record range differs from count")
         if next_index is not None and first_index != next_index:
             raise ResidentCaptureError("resident shards are not contiguous")
+        if next_ordinal is not None and ordinal != next_ordinal:
+            raise ResidentCaptureError("resident shard ordinals are not contiguous")
         next_index = last_index + 1
+        next_ordinal = ordinal + 1
         name = shard.get("input")
         if not isinstance(name, str) or not name or Path(name).name != name:
             raise ResidentCaptureError("shard input must be a plain filename")
@@ -280,7 +288,7 @@ def publish_manifest(root: Path, manifest: dict[str, object]) -> tuple[Path, str
     return destination.resolve(strict=True), digest
 
 
-def self_test() -> None:
+def self_test(capture_executable: Path | None = None) -> None:
     with tempfile.TemporaryDirectory(prefix="flashmap-resident-", dir=Path.cwd()) as raw:
         root = Path(raw)
         plan = root / "plan"
@@ -343,6 +351,57 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("non-contiguous resident jobs were accepted")
+        gapped_ordinals = [dict(shard) for shard in shards]
+        gapped_ordinals[1]["shard_ordinal"] = 2
+        try:
+            build_manifest(
+                plan_root=plan,
+                capture_root=output,
+                shards=gapped_ordinals,
+                target_sha256="11" * 32,
+                producer_sha256="22" * 32,
+                producer_git_commit="33" * 20,
+                feature_abi_sha256="44" * 32,
+                max_context=4096,
+            )
+        except ResidentCaptureError:
+            pass
+        else:
+            raise AssertionError("non-contiguous resident ordinals were accepted")
+        if capture_executable is not None:
+            capture_executable = _regular_file(
+                capture_executable, "capture executable"
+            )
+            native_gap = json.loads(json.dumps(manifest))
+            native_gap["feature_abi_sha256"] = planner.FEATURE_ABI_SHA256
+            native_gap["producer_sha256"] = _sha256_file(capture_executable)
+            native_gap["jobs"][1]["shard_ordinal"] = 2
+            native_gap_path = root / "native-gapped-ordinals.json"
+            native_gap_payload = _canonical(native_gap)
+            native_gap_path.write_bytes(native_gap_payload)
+            completed = subprocess.run(
+                [
+                    str(capture_executable),
+                    "--model",
+                    str(plan / "shard-00000.input.jsonl"),
+                    "--resident-manifest",
+                    str(native_gap_path),
+                    "--resident-manifest-sha256",
+                    hashlib.sha256(native_gap_payload).hexdigest(),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if (
+                completed.returncode == 0
+                or "resident jobs are duplicate or non-contiguous"
+                not in completed.stderr
+            ):
+                raise AssertionError(
+                    "native parser accepted non-contiguous resident ordinals: "
+                    f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+                )
         (output / "shard-00000").mkdir()
         try:
             validate_manifest(path, digest)
@@ -362,4 +421,6 @@ def self_test() -> None:
 
 
 if __name__ == "__main__":
-    self_test()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--capture-executable", type=Path)
+    self_test(parser.parse_args().capture_executable)

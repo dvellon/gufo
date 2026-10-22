@@ -749,6 +749,7 @@ ResidentManifest ParseResidentManifest(const Arguments& args,
   std::set<std::filesystem::path> outputs;
   std::set<std::uint64_t> ordinals;
   std::uint64_t next_index = 0;
+  std::uint64_t next_ordinal = 0;
   bool first = true;
   for (const auto& value : jobs->items()) {
     RequireKeys(
@@ -773,13 +774,17 @@ ResidentManifest ParseResidentManifest(const Arguments& args,
     if (job.last_index < job.first_index ||
         job.last_index - job.first_index + 1 != job.records)
       throw std::runtime_error("resident job record range differs from count");
-    if ((!first && job.first_index != next_index) ||
+    if ((!first && (job.first_index != next_index ||
+                    job.shard_ordinal != next_ordinal)) ||
         !inputs.insert(job.input).second ||
         !outputs.insert(job.output).second ||
         !ordinals.insert(job.shard_ordinal).second)
       throw std::runtime_error("resident jobs are duplicate or non-contiguous");
+    if (job.shard_ordinal == std::numeric_limits<std::uint64_t>::max())
+      throw std::runtime_error("resident shard ordinal has no safe successor");
     first = false;
     next_index = job.last_index + 1;
+    next_ordinal = job.shard_ordinal + 1;
     result.jobs.push_back(std::move(job));
   }
   return result;

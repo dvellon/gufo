@@ -11,6 +11,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "src/core/gguf_identity.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"

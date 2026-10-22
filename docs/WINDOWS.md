@@ -1,9 +1,11 @@
 # Windows (native, gfx1151)
 
-Gufo builds and runs natively on Windows 11 x64 against AMD's TheRock ROCm
-distribution for gfx1151 (Ryzen AI Max+ 395 / Radeon 8060S). No WSL. Linux
-builds are unaffected: the port lives in `compat/win32`, Windows-only files and
-`_WIN32` branches.
+Gufo's qualified Windows path builds and runs natively on Windows 11 x64
+against AMD's TheRock ROCm distribution for gfx1151 (Ryzen AI Max+ 395 /
+Radeon 8060S). No WSL. Linux builds are unaffected: the port lives in
+`compat/win32`, Windows-only files and `_WIN32` branches. AMD's native Windows
+ROCm 7.2 SDK is also recognized by the build script, but that path is currently
+experimental; see [Native AMD ROCm 7.2 SDK](#native-amd-rocm-72-sdk).
 
 ## Prerequisites
 
@@ -40,6 +42,52 @@ powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-tes
 builds, and copies the ROCm and vcpkg runtime DLLs plus the
 hipBLASLt/rocBLAS kernel libraries next to `gufo.exe`, so `build\release` runs
 as it is.
+
+### Native AMD ROCm 7.2 SDK
+
+The same script recognizes AMD's native Windows SDK layout, including clang
+and the device bitcode installed under `C:\Program Files\AMD\ROCm\7.2`. Pass
+the Ninja executable explicitly: the script's default is
+`C:\tools\ninja\ninja.exe`, while package managers such as WinGet commonly
+install it elsewhere.
+
+```powershell
+$ninja = (Get-Command ninja.exe -ErrorAction Stop).Source
+powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 `
+  -Preset release `
+  -BuildDir build\release-rocm72-native `
+  -Target gufo_qwen38_flash_next `
+  -Rocm 'C:\Program Files\AMD\ROCm\7.2' `
+  -Ninja $ninja `
+  -Jobs 4 `
+  -Reconfigure
+```
+
+If ROCm package CMake files or runtime DLLs live outside the SDK root, pass
+their roots with `-RocmDependencyRoots`. The script adds them to
+`CMAKE_PREFIX_PATH` and searches them when copying runtime files. Passing a
+wheel `_rocm_sdk_devel` directory also discovers sibling `_rocm_sdk_core` and
+`_rocm_sdk_libraries` directories automatically. For example, when invoking
+the script from PowerShell so the array remains typed:
+
+```powershell
+& .\tools\windows\build.ps1 `
+  -Preset release `
+  -BuildDir build\release-rocm72-native `
+  -Target gufo_qwen38_flash_next `
+  -Rocm 'C:\Program Files\AMD\ROCm\7.2' `
+  -RocmDependencyRoots @('C:\path\to\_rocm_sdk_devel') `
+  -Ninja (Get-Command ninja.exe -ErrorAction Stop).Source `
+  -Jobs 4 `
+  -Reconfigure
+```
+
+The native 7.2 path currently reaches CMake configuration with AMD clang 21
+and the vcpkg dependencies. It has not yet produced or passed the qualified
+Gufo target and model/operator/performance tests; the current validation host
+stops at its missing host `pkg-config` executable. Install or expose that host
+tool before expecting configuration to complete. TheRock 10.1.0 remains the
+qualified Windows toolchain described by the rest of this document.
 
 ## Running Qwen3.8-Flash-Next
 

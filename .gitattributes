@@ -1,0 +1,7 @@
+# FlashMap manifests, fixtures, and source identities are byte-bound across
+# Windows and Linux hosts. Keep their checked-out bytes canonical everywhere.
+tools/qwen-flash/*.json text eol=lf
+tools/qwen-flash/*.jsonl text eol=lf
+tools/qwen-flash/*.py text eol=lf
+tools/qwen-flash/*.cpp text eol=lf
+docs/models/qwen3.8-flash-next/FLASHMAP-*.md text eol=lf

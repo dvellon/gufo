@@ -13,8 +13,10 @@
 #   powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test -Target <target>
 param(
   [string]$Preset = "release",
+  [string]$BuildDir = "",
   [string]$Target = "",
   [string]$Rocm = "",
+  [string[]]$RocmDependencyRoots = @(),
   [string]$Vcpkg = "C:\vcpkg",
   [string]$Ninja = "C:\tools\ninja\ninja.exe",
   [int]$Jobs = 0,
@@ -34,12 +36,16 @@ if (-not $Rocm) {
 # fused kernels differently (see docs\WINDOWS.md).
 $validatedRock = "10.1.0"
 $rockVersionFile = Join-Path $Rocm ".info\version"
-if (-not (Test-Path $rockVersionFile)) {
-  throw "TheRock not found at $Rocm (see docs\WINDOWS.md, or run tools\windows\check.ps1)"
+$rockVersion = if (Test-Path $rockVersionFile) {
+  (Get-Content $rockVersionFile -TotalCount 1).Trim()
+} elseif ((Test-Path (Join-Path $Rocm "bin\hipcc.exe")) -and
+          (Test-Path (Join-Path $Rocm "bin\amdhip64_7.dll"))) {
+  "native-windows-install"
+} else {
+  throw "ROCm SDK not found at $Rocm (see docs\WINDOWS.md, or run tools\windows\check.ps1)"
 }
-$rockVersion = (Get-Content $rockVersionFile -TotalCount 1).Trim()
 if ($rockVersion -ne $validatedRock) {
-  Write-Warning "TheRock $rockVersion at $Rocm; this port is validated on $validatedRock"
+  Write-Warning "ROCm $rockVersion at $Rocm; this port is validated on TheRock $validatedRock"
 }
 
 # Import the MSVC developer environment (headers, libs, link.exe).
@@ -52,18 +58,34 @@ cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
   if ($_ -match "^([^=]+)=(.*)$") { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
 }
 
-$env:HIP_PATH = $Rocm.Replace('\', '/')
-$env:HIP_DEVICE_LIB_PATH = "$Rocm/lib/llvm/amdgcn/bitcode".Replace('\', '/')
-$env:PATH = "$Rocm\bin;$Rocm\lib\llvm\bin;$(Split-Path $Ninja);$env:PATH"
-$clang = "$Rocm\lib\llvm\bin\clang.exe".Replace('\', '/')
-$clangxx = "$Rocm\lib\llvm\bin\clang++.exe".Replace('\', '/')
+$compilerDir = @((Join-Path $Rocm "lib\llvm\bin"), (Join-Path $Rocm "bin")) |
+  Where-Object { Test-Path (Join-Path $_ "clang++.exe") } |
+  Select-Object -First 1
+$deviceLibDir = @((Join-Path $Rocm "lib\llvm\amdgcn\bitcode"),
+                  (Join-Path $Rocm "amdgcn\bitcode")) |
+  Where-Object { Test-Path (Join-Path $_ "ocml.bc") } |
+  Select-Object -First 1
+if (-not $compilerDir -or -not $deviceLibDir) {
+  throw "ROCm compiler or device bitcode not found below $Rocm"
+}
 
-$build = Join-Path $root "build\$Preset"
+$env:HIP_PATH = $Rocm.Replace('\', '/')
+$env:HIP_DEVICE_LIB_PATH = $deviceLibDir.Replace('\', '/')
+$env:PATH = "$Rocm\bin;$compilerDir;$(Split-Path $Ninja);$env:PATH"
+$clang = (Join-Path $compilerDir "clang.exe").Replace('\', '/')
+$clangxx = (Join-Path $compilerDir "clang++.exe").Replace('\', '/')
+$rocmPrefixPath = (@($Rocm) + $RocmDependencyRoots) -join ";"
+
+$build = if ($BuildDir) {
+  if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
+} else {
+  Join-Path $root "build\$Preset"
+}
 if ($Reconfigure -and (Test-Path "$build\CMakeCache.txt")) {
   Remove-Item "$build\CMakeCache.txt"
 }
 if (-not (Test-Path "$build\CMakeCache.txt")) {
-  cmake -S $root --preset $Preset `
+  cmake -S $root --preset $Preset -B $build `
     "-DCMAKE_MAKE_PROGRAM=$($Ninja.Replace('\', '/'))" `
     "-DCMAKE_C_COMPILER=$clang" `
     "-DCMAKE_CXX_COMPILER=$clangxx" `
@@ -72,8 +94,7 @@ if (-not (Test-Path "$build\CMakeCache.txt")) {
     "-DCMAKE_HIP_FLAGS=--rocm-device-lib-path=$($env:HIP_DEVICE_LIB_PATH)" `
     "-DCMAKE_TOOLCHAIN_FILE=$($Vcpkg.Replace('\', '/'))/scripts/buildsystems/vcpkg.cmake" `
     "-DVCPKG_TARGET_TRIPLET=x64-windows" `
-    "-DCMAKE_PREFIX_PATH=$($Rocm.Replace('\', '/'))" `
-    "-DCMAKE_LINKER_TYPE=LLD" `
+    "-DCMAKE_PREFIX_PATH=$($rocmPrefixPath.Replace('\', '/'))" `
     @CMakeArgs
   if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 }
@@ -90,7 +111,17 @@ if ($LASTEXITCODE -ne 0) { throw "build failed" }
 # The 10.1 wheel splits runtime DLLs between sibling core, libraries and devel
 # packages, while extracted TheRock distributions keep them under one root.
 $bin = $build
-$rocmRoots = @($Rocm)
+$rocmRoots = @()
+foreach ($candidate in $RocmDependencyRoots) {
+  $rocmRoots += $candidate
+  if ((Split-Path $candidate -Leaf) -eq "_rocm_sdk_devel") {
+    $packageRoot = Split-Path $candidate -Parent
+    $rocmRoots += @("_rocm_sdk_core", "_rocm_sdk_libraries") |
+      ForEach-Object { Join-Path $packageRoot $_ } |
+      Where-Object { Test-Path $_ }
+  }
+}
+$rocmRoots += $Rocm
 if ((Split-Path $Rocm -Leaf) -eq "_rocm_sdk_devel") {
   $packageRoot = Split-Path $Rocm -Parent
   $rocmRoots += @("_rocm_sdk_core", "_rocm_sdk_libraries") |

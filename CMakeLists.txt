@@ -90,6 +90,11 @@ if (ENGINE_ENABLE_HIP)
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp REQUIRED)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
+  if (WIN32 AND CMAKE_HIP_COMPILER_VERSION VERSION_LESS 22)
+    add_compile_options($<$<COMPILE_LANGUAGE:HIP>:-include>
+      $<$<COMPILE_LANGUAGE:HIP>:${CMAKE_SOURCE_DIR}/compat/win32/rocprim_clang21_compat.hpp>)
+    message(STATUS "gufo: rocPRIM future-processor compatibility for Clang ${CMAKE_HIP_COMPILER_VERSION}")
+  endif()
   message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
 endif()
 

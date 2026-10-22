@@ -52,7 +52,6 @@ struct Uploader {
   bool ok{true};
   std::uint32_t shard_base{0};
   std::uint64_t requested{0};
-
   [[nodiscard]] bool Measuring() const noexcept { return weights == nullptr; }
 
   void Fail(const std::string& message) {
@@ -77,9 +76,12 @@ struct Uploader {
     }
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
-    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+    const hipError_t allocation = Allocate(&ptr, size + kTailMargin);
+    if (allocation != hipSuccess) {
       Fail("device allocation failed for " + std::string(t.name) + " (" +
-           std::to_string(size) + " bytes)");
+           std::to_string(size) + " bytes): " + hipGetErrorName(allocation) +
+           " (" + hipGetErrorString(allocation) + ", code " +
+           std::to_string(static_cast<int>(allocation)) + ")");
       return d;
     }
     if (Measuring()) {
@@ -125,8 +127,13 @@ struct Uploader {
       auto& dst = part == 0 ? embedding : hidden;
       dst = combined;
       dst.cols /= 2;
-      if (Allocate(&dst.data, part_bytes + kTailMargin) != hipSuccess) {
-        Fail("MTP split projection allocation failed");
+      const hipError_t allocation =
+          Allocate(&dst.data, part_bytes + kTailMargin);
+      if (allocation != hipSuccess) {
+        Fail("MTP split projection allocation failed: " +
+             std::string(hipGetErrorName(allocation)) + " (" +
+             hipGetErrorString(allocation) + ", code " +
+             std::to_string(static_cast<int>(allocation)) + ")");
         return;
       }
       if (Measuring()) {
@@ -175,8 +182,12 @@ struct Uploader {
       size += t->SizeBytes();
     }
     void* ptr = nullptr;
-    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
-      Fail("stacked tensor allocation failed");
+    const hipError_t allocation = Allocate(&ptr, size + kTailMargin);
+    if (allocation != hipSuccess) {
+      Fail("stacked tensor allocation failed: " +
+           std::string(hipGetErrorName(allocation)) + " (" +
+           hipGetErrorString(allocation) + ", code " +
+           std::to_string(static_cast<int>(allocation)) + ")");
       return d;
     }
     if (!Measuring()) {
@@ -207,9 +218,13 @@ struct Uploader {
     }
     const std::size_t count = size / sizeof(float);
     void* half = nullptr;
-    if (Allocate(&half, count * sizeof(std::uint16_t) + kTailMargin) !=
-        hipSuccess) {
-      Fail("stacked tensor allocation failed");
+    const hipError_t half_allocation =
+        Allocate(&half, count * sizeof(std::uint16_t) + kTailMargin);
+    if (half_allocation != hipSuccess) {
+      Fail("stacked tensor allocation failed: " +
+           std::string(hipGetErrorName(half_allocation)) + " (" +
+           hipGetErrorString(half_allocation) + ", code " +
+           std::to_string(static_cast<int>(half_allocation)) + ")");
       return d;
     }
     if (Measuring()) {

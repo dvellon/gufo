@@ -85,11 +85,21 @@ public:
 
 private:
   static Placement Decide(std::uint64_t total_weight_bytes) {
+#if defined(_WIN32)
+    // WDDM's hipMalloc heap is the pageable dedicated + shared UMA aperture.
+    // A whole-model managed placement makes every uploaded page resident in
+    // CPU-visible RAM and can exhaust it while the same model fits the WDDM
+    // aperture. Preserve pageable placement on Windows; an individual real
+    // OOM still falls back through AllocateDeviceOrManaged.
+    (void)total_weight_bytes;
+    return Placement::kMalloc;
+#else
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
     if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess)
       return Placement::kManaged;
     return ChooseWeightPlacement(free_bytes, total_weight_bytes);
+#endif
   }
 
   Placement placement_;

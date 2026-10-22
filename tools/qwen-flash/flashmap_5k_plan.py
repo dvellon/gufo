@@ -16,8 +16,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 
@@ -42,6 +44,7 @@ RECORD_TRAILER_BYTES = 64
 ALIGNMENT = 64
 FEATURE_BYTES_PER_TOKEN = 6 * 2560 * 2
 MAX_JSONL_LINE_BYTES = 16 << 20
+WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 class PlanError(ValueError):
@@ -177,6 +180,56 @@ def _publish_no_replace(staging: Path, output: Path) -> None:
             raise OSError(error, os.strerror(error), str(output))
         return
     raise PlanError("atomic no-overwrite publication is unsupported on this platform")
+
+
+def _is_reparse_point(status: os.stat_result) -> bool:
+    return bool(
+        getattr(status, "st_file_attributes", 0)
+        & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _require_plain_directory(path: Path, field: str) -> None:
+    try:
+        status = path.lstat()
+    except OSError as error:
+        raise PlanError(f"{field} is not a readable directory") from error
+    if (
+        not stat.S_ISDIR(status.st_mode)
+        or stat.S_ISLNK(status.st_mode)
+        or _is_reparse_point(status)
+    ):
+        raise PlanError(f"{field} must be a non-reparse directory")
+
+
+def _require_plain_file(path: Path, field: str) -> None:
+    try:
+        status = path.lstat()
+    except OSError as error:
+        raise PlanError(f"{field} is not a readable file") from error
+    _require_plain_file_status(status, field)
+
+
+def _require_plain_file_status(status: os.stat_result, field: str) -> None:
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or stat.S_ISLNK(status.st_mode)
+        or _is_reparse_point(status)
+    ):
+        raise PlanError(f"{field} must be a regular non-reparse file")
+
+
+def _validate_plan_directory_inventory(root: Path, expected: set[str]) -> None:
+    _require_plain_directory(root, "plan directory")
+    try:
+        entries = list(os.scandir(root))
+    except OSError as error:
+        raise PlanError("plan directory inventory is not readable") from error
+    actual = {entry.name for entry in entries}
+    if len(actual) != len(entries) or actual != expected:
+        raise PlanError("plan directory contains missing or unexpected entries")
+    for entry in entries:
+        _require_plain_file(Path(entry.path), f"plan entry {entry.name!r}")
 
 
 def _read_source(
@@ -431,8 +484,10 @@ def create_plan(args: argparse.Namespace) -> Path:
 
 
 def validate_plan(root: Path) -> dict[str, object]:
-    root = root.resolve()
+    root = root.absolute()
+    _require_plain_directory(root, "plan directory")
     manifest_path = root / "plan.json"
+    _require_plain_file(manifest_path, "plan manifest")
     try:
         manifest = json.loads(
             manifest_path.read_text(encoding="utf-8"),
@@ -448,15 +503,45 @@ def validate_plan(root: Path) -> dict[str, object]:
     if not isinstance(shards, list) or not shards:
         raise PlanError("plan contains no shards")
     dataset_name = manifest.get("dataset")
-    if not isinstance(dataset_name, str) or Path(dataset_name).name != dataset_name:
+    if (
+        not isinstance(dataset_name, str)
+        or not dataset_name
+        or Path(dataset_name).name != dataset_name
+        or dataset_name == "plan.json"
+    ):
         raise PlanError("plan dataset filename is invalid")
+    expected_files = {"plan.json", dataset_name}
+    for ordinal, shard in enumerate(shards):
+        if not isinstance(shard, dict) or shard.get("shard_ordinal") != ordinal:
+            raise PlanError("plan shard order is not contiguous")
+        input_name = shard.get("input")
+        alignment_name = shard.get("alignment")
+        if (
+            not isinstance(input_name, str)
+            or not input_name
+            or not isinstance(alignment_name, str)
+            or not alignment_name
+        ):
+            raise PlanError("plan shard filenames are invalid")
+        if (
+            Path(input_name).name != input_name
+            or Path(alignment_name).name != alignment_name
+        ):
+            raise PlanError("plan shard filename escapes the plan directory")
+        if (
+            input_name == alignment_name
+            or input_name in expected_files
+            or alignment_name in expected_files
+        ):
+            raise PlanError("plan shard filenames are not unique")
+        expected_files.update((input_name, alignment_name))
+    _validate_plan_directory_inventory(root, expected_files)
     dataset_path = root / dataset_name
     if _sha256_file(dataset_path) != manifest.get("dataset_sha256"):
         raise PlanError("training dataset digest does not match")
     if dataset_path.stat().st_size != manifest.get("dataset_bytes"):
         raise PlanError("training dataset byte count does not match")
     dataset_lines = dataset_path.read_text(encoding="utf-8").splitlines()
-    expected_files = {"plan.json", dataset_name}
     total_records = 0
     total_tokens = 0
     total_gfm_bytes = 0
@@ -473,7 +558,6 @@ def validate_plan(root: Path) -> dict[str, object]:
             raise PlanError("plan shard filename escapes the plan directory")
         input_path = root / input_name
         alignment_path = root / alignment_name
-        expected_files.update((input_name, alignment_name))
         if _sha256_file(input_path) != shard.get("input_sha256"):
             raise PlanError("capture input digest does not match")
         if _sha256_file(alignment_path) != shard.get("alignment_sha256"):
@@ -508,9 +592,6 @@ def validate_plan(root: Path) -> dict[str, object]:
         total_records += len(input_lines)
         total_tokens += shard_tokens
         total_gfm_bytes += int(shard["expected_gfm_bytes"])
-    actual_files = {path.name for path in root.iterdir() if path.is_file()}
-    if actual_files != expected_files:
-        raise PlanError("plan directory contains missing or unexpected files")
     if (
         total_records != manifest.get("records")
         or total_tokens != manifest.get("tokens")
@@ -592,6 +673,29 @@ def self_test() -> None:
         for path in first.iterdir():
             if path.is_file() and path.read_bytes() != (second / path.name).read_bytes():
                 raise AssertionError("identical sources produced different shard bytes")
+        unexpected_directory = first / "unexpected-directory"
+        unexpected_directory.mkdir()
+        try:
+            validate_plan(first)
+        except PlanError:
+            pass
+        else:
+            raise AssertionError("unexpected plan directory was accepted")
+        unexpected_directory.rmdir()
+        rejected_statuses = (
+            os.stat_result((stat.S_IFLNK | 0o777,) + (0,) * 9),
+            SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_file_attributes=WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT,
+            ),
+        )
+        for rejected_status in rejected_statuses:
+            try:
+                _require_plain_file_status(rejected_status, "test link")
+            except PlanError:
+                pass
+            else:
+                raise AssertionError("plan symlink or reparse point was accepted")
         bad = json.loads(_canonical(records[0]))
         bad["target_sha256"] = "55" * 32
         source.write_bytes(_canonical(bad))

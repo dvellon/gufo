@@ -1,0 +1,1 @@
+{"add_generation_prompt":true,"chat_template_sha256":"12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce","enable_thinking":true,"format":"gufo.flashmap.exact-target-generation.v1","max_context":4096,"max_response_tokens":128,"preserve_thinking":true,"reasoning_effort":"xhigh","sampling":"greedy","stop_at_eos":true}

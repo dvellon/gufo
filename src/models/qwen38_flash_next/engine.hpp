@@ -88,6 +88,9 @@ public:
     return options_.decode_concurrency;
   }
   [[nodiscard]] std::string ModelName() const;
+  /// Full-content identity of the bound GGUF shard set. The first lookup may
+  /// scan the artifact; later calls use the core identity cache.
+  [[nodiscard]] std::string ArtifactIdentityHex() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;

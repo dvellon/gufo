@@ -1,5 +1,7 @@
 #include "src/models/qwen38_flash_next/engine.hpp"
 
+#include "src/core/gguf_identity.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -69,6 +71,10 @@ std::uint64_t SessionSnapshotHostBytes(std::uint32_t token_count,
 }  // namespace
 
 Model::~Model() = default;
+
+std::string Model::ArtifactIdentityHex() const {
+  return core::GgufIdentityHex(*reader_);
+}
 
 std::shared_ptr<Model> Model::Load(const std::string& model_path,
                                    const ModelOptions& options,

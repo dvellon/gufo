@@ -318,6 +318,7 @@ void SealCompletion(const std::filesystem::path& output, const Shard& shard,
     sink.Commit(payload);
     sink.Close();
   }
+  MakeReadOnly(partial);
   PublishNoReplace(partial, receipt);
   MakeReadOnly(receipt);
   ValidateCompletion(output, receipt, shard, package, manifest_sha256);

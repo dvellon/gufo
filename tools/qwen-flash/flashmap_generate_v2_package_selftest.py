@@ -147,12 +147,26 @@ def main() -> int:
             "identity differs")
         partial.unlink()
 
+        receipt = responses / (first["response_file"] + ".complete.json")
+        receipt_partial = Path(str(receipt) + ".partial")
+        receipt.chmod(0o600)
+        receipt.rename(receipt_partial)
+        assert len(package.response_rows(
+            manifest,
+            manifest_path,
+            responses,
+            first,
+            partial=False,
+            completion_partial=True,
+        )) == 4
+        receipt_partial.rename(receipt)
+        receipt.chmod(0o444)
+
         complete.chmod(0o600)
         expect_failure(lambda: package.response_rows(
             manifest, manifest_path, responses, first, partial=False),
             "read-only")
         complete.chmod(0o444)
-        receipt = responses / (first["response_file"] + ".complete.json")
         receipt.chmod(0o600)
         receipt.write_bytes(receipt.read_bytes().replace(
             package.digest_file(complete).encode("ascii"), b"f" * 64

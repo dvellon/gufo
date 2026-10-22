@@ -20,6 +20,7 @@ from typing import Any, Iterable
 
 
 FORMAT = "gufo.flashmap.exact-target-shards.v2"
+COMPLETION_FORMAT = "gufo.flashmap.response-completion.v1"
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 512 * 1024 * 1024
 ROW_KEYS = {
@@ -55,6 +56,17 @@ SHARD_KEYS = {
     "response_file",
     "start",
 }
+COMPLETION_KEYS = {
+    "decode_width",
+    "end",
+    "format",
+    "manifest_sha256",
+    "records",
+    "response_file",
+    "response_sha256",
+    "runtime_identity",
+    "start",
+}
 
 
 class PackageError(RuntimeError):
@@ -83,11 +95,15 @@ def require_sha(value: str, digits: int, field: str) -> None:
         raise PackageError(f"{field} must be {digits} lowercase hexadecimal digits")
 
 
-def read_lines(path: Path) -> list[bytes]:
+def read_lines(path: Path, *, allow_empty: bool = False) -> list[bytes]:
     if path.stat().st_size > MAX_PACKAGE_FILE_BYTES:
         raise PackageError(f"{path} exceeds the 512 MiB byte envelope")
     data = path.read_bytes()
-    if not data or not data.endswith(b"\n"):
+    if not data:
+        if allow_empty:
+            return []
+        raise PackageError(f"{path} must be non-empty and newline-terminated")
+    if not data.endswith(b"\n"):
         raise PackageError(f"{path} must be non-empty and newline-terminated")
     lines = data.splitlines(keepends=True)
     if any(line == b"\n" or len(line) > 16 * 1024 * 1024 for line in lines):
@@ -133,7 +149,63 @@ def publish_no_replace(partial: Path, output: Path) -> None:
         os.link(partial, output)
     except OSError as error:
         raise PackageError("non-overwriting merged publication failed") from error
+    _fsync_parent(output)
     partial.unlink()
+    _fsync_parent(output)
+
+
+def _fsync_parent(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path.parent or Path("."), flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _require_read_only(path: Path, description: str) -> None:
+    write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+    if path.stat().st_mode & write_bits:
+        raise PackageError(f"{description} must be read-only")
+
+
+def completion_payload(manifest_sha256: str, manifest: dict[str, Any],
+                       shard: dict[str, Any], response_sha256: str) -> bytes:
+    require_sha(manifest_sha256, 64, "manifest sha256")
+    require_sha(response_sha256, 64, "response sha256")
+    return canonical({
+        "decode_width": manifest["decode_width"],
+        "end": shard["end"],
+        "format": COMPLETION_FORMAT,
+        "manifest_sha256": manifest_sha256,
+        "records": shard["end"] - shard["start"],
+        "response_file": shard["response_file"],
+        "response_sha256": response_sha256,
+        "runtime_identity": manifest["runtime_identity"],
+        "start": shard["start"],
+    })
+
+
+def validate_completion_receipt(manifest: dict[str, Any], manifest_path: Path,
+                                responses: Path, shard: dict[str, Any]) -> None:
+    response = responses / shard["response_file"]
+    receipt = responses / (shard["response_file"] + ".complete.json")
+    if receipt.is_symlink() or not receipt.is_file():
+        raise PackageError(f"response completion receipt is absent: {receipt.name}")
+    raw = receipt.read_bytes()
+    value = load_json_line(raw, "response completion receipt")
+    if (not isinstance(value, dict) or set(value) != COMPLETION_KEYS or
+            canonical(value) != raw):
+        raise PackageError("response completion receipt is not canonical")
+    expected = completion_payload(
+        digest_file(manifest_path), manifest, shard, digest_file(response)
+    )
+    if raw != expected:
+        raise PackageError("response completion receipt binding differs")
+    _require_read_only(response, "published response shard")
+    _require_read_only(receipt, "response completion receipt")
 
 
 def load_manifest(path: Path, expected_sha256: str | None = None) -> dict[str, Any]:
@@ -246,10 +318,12 @@ def response_rows(manifest: dict[str, Any], manifest_path: Path,
     path = responses / (shard["response_file"] + suffix)
     if path.is_symlink() or not path.is_file():
         raise PackageError(f"response shard is absent: {path.name}")
-    lines = read_lines(path)
+    lines = read_lines(path, allow_empty=partial)
     expected = shard["end"] - shard["start"]
     if len(lines) > expected or (not partial and len(lines) != expected):
         raise PackageError("response shard row count differs")
+    if not partial:
+        validate_completion_receipt(manifest, manifest_path, responses, shard)
     prompt_path = manifest_path.parent / shard["prompt_file"]
     prompt_raw = prompt_path.read_bytes()
     if (prompt_path.is_symlink() or
@@ -298,9 +372,11 @@ def validate_response_inventory(manifest: dict[str, Any], responses: Path,
                                 *, allow_partials: bool) -> None:
     if responses.is_symlink() or not responses.is_dir():
         raise PackageError("responses must be an existing real directory")
-    allowed = {shard["response_file"] for shard in manifest["shards"]}
+    finals = {shard["response_file"] for shard in manifest["shards"]}
+    receipts = {name + ".complete.json" for name in finals}
+    allowed = finals | receipts
     if allow_partials:
-        allowed |= {name + ".partial" for name in allowed}
+        allowed |= {name + ".partial" for name in finals | receipts}
     for entry in responses.iterdir():
         if entry.name not in allowed or entry.is_symlink() or not entry.is_file():
             raise PackageError(f"unexpected response inventory entry: {entry.name}")
@@ -308,8 +384,20 @@ def validate_response_inventory(manifest: dict[str, Any], responses: Path,
         for shard in manifest["shards"]:
             final = responses / shard["response_file"]
             partial = responses / (shard["response_file"] + ".partial")
+            receipt = responses / (shard["response_file"] + ".complete.json")
+            receipt_partial = Path(str(receipt) + ".partial")
             if final.exists() and partial.exists():
                 raise PackageError("response shard final and partial both exist")
+            if receipt.exists() and (not final.exists() or receipt_partial.exists()):
+                raise PackageError("response completion state is ambiguous")
+            if receipt_partial.exists() and not final.exists():
+                raise PackageError("partial response receipt has no final shard")
+    else:
+        for shard in manifest["shards"]:
+            final = responses / shard["response_file"]
+            receipt = responses / (shard["response_file"] + ".complete.json")
+            if not final.is_file() or not receipt.is_file():
+                raise PackageError("response shard or completion receipt is absent")
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -405,7 +493,9 @@ def merge(args: argparse.Namespace) -> None:
             os.fsync(stream.fileno())
     finally:
         os.close(descriptor)
+    partial.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     publish_no_replace(partial, args.output)
+    args.output.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     print(f"FLASHMAP_V2_MERGE_OK records={records} sha256={digest_file(args.output)}")
 
 
@@ -444,8 +534,19 @@ def parser() -> argparse.ArgumentParser:
                                     allow_partials=True)
         if args.shard_index < 0 or args.shard_index >= len(manifest["shards"]):
             raise PackageError("shard index is outside the manifest")
-        rows = response_rows(manifest, args.manifest, args.responses,
-                             manifest["shards"][args.shard_index], partial=True)
+        shard = manifest["shards"][args.shard_index]
+        final = args.responses / shard["response_file"]
+        partial = Path(str(final) + ".partial")
+        if final.exists():
+            rows = response_rows(
+                manifest, args.manifest, args.responses, shard, partial=False
+            )
+        elif partial.exists():
+            rows = response_rows(
+                manifest, args.manifest, args.responses, shard, partial=True
+            )
+        else:
+            rows = []
         print(f"FLASHMAP_V2_RESUME_VALID rows={len(rows)}")
     resume.set_defaults(run=run_resume)
     combine = sub.add_parser("merge")

@@ -189,9 +189,12 @@ def completion_payload(manifest_sha256: str, manifest: dict[str, Any],
 
 
 def validate_completion_receipt(manifest: dict[str, Any], manifest_path: Path,
-                                responses: Path, shard: dict[str, Any]) -> None:
+                                responses: Path, shard: dict[str, Any], *,
+                                partial: bool = False) -> None:
     response = responses / shard["response_file"]
     receipt = responses / (shard["response_file"] + ".complete.json")
+    if partial:
+        receipt = Path(str(receipt) + ".partial")
     if receipt.is_symlink() or not receipt.is_file():
         raise PackageError(f"response completion receipt is absent: {receipt.name}")
     raw = receipt.read_bytes()
@@ -205,7 +208,8 @@ def validate_completion_receipt(manifest: dict[str, Any], manifest_path: Path,
     if raw != expected:
         raise PackageError("response completion receipt binding differs")
     _require_read_only(response, "published response shard")
-    _require_read_only(receipt, "response completion receipt")
+    if not partial:
+        _require_read_only(receipt, "response completion receipt")
 
 
 def load_manifest(path: Path, expected_sha256: str | None = None) -> dict[str, Any]:
@@ -313,7 +317,7 @@ def validate_package(manifest_path: Path, expected_sha256: str | None = None) ->
 
 def response_rows(manifest: dict[str, Any], manifest_path: Path,
                   responses: Path, shard: dict[str, Any], *,
-                  partial: bool) -> list[bytes]:
+                  partial: bool, completion_partial: bool = False) -> list[bytes]:
     suffix = ".partial" if partial else ""
     path = responses / (shard["response_file"] + suffix)
     if path.is_symlink() or not path.is_file():
@@ -323,7 +327,13 @@ def response_rows(manifest: dict[str, Any], manifest_path: Path,
     if len(lines) > expected or (not partial and len(lines) != expected):
         raise PackageError("response shard row count differs")
     if not partial:
-        validate_completion_receipt(manifest, manifest_path, responses, shard)
+        validate_completion_receipt(
+            manifest,
+            manifest_path,
+            responses,
+            shard,
+            partial=completion_partial,
+        )
     prompt_path = manifest_path.parent / shard["prompt_file"]
     prompt_raw = prompt_path.read_bytes()
     if (prompt_path.is_symlink() or
@@ -537,9 +547,17 @@ def parser() -> argparse.ArgumentParser:
         shard = manifest["shards"][args.shard_index]
         final = args.responses / shard["response_file"]
         partial = Path(str(final) + ".partial")
+        receipt_partial = args.responses / (
+            shard["response_file"] + ".complete.json.partial"
+        )
         if final.exists():
             rows = response_rows(
-                manifest, args.manifest, args.responses, shard, partial=False
+                manifest,
+                args.manifest,
+                args.responses,
+                shard,
+                partial=False,
+                completion_partial=receipt_partial.exists(),
             )
         elif partial.exists():
             rows = response_rows(

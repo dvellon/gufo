@@ -1,0 +1,29 @@
+{
+  "category_counts": {
+    "code": 1250,
+    "constraint-following": 500,
+    "editing": 250,
+    "general-instruction": 1750,
+    "reasoning-math": 1000,
+    "summarization": 250
+  },
+  "corpus_manifest_sha256": "0e55e3750babdfd82c4a953a9a60dc878aaf6342fd66588c3d5d4b38fade67f6",
+  "format": "gufo.flashmap.prompt-corpus-evidence.v1",
+  "network_bytes_downloaded": 132753462,
+  "normalized_source_manifest_sha256": "281201cb9db60d55f41417915a612c1fd0a3ad545cf9333259acde4e579fc52a",
+  "notes": [
+    "All source objects were authenticated against an exact repository commit, LFS SHA-256, and byte length before range reads.",
+    "Only deterministically selected prompt columns and Parquet metadata were retained; no upstream assistant response is present in the normalized or final artifact.",
+    "The corpus is prompt-only. Exact target responses and target-token capture remain separate later stages."
+  ],
+  "prompt_bytes": 6397190,
+  "prompt_records": 5000,
+  "prompt_sha256": "81c962011ca55e1214495c41e23c0c69f1ca6819157264ce732e4fef3509a5f5",
+  "recipe_sha256": "2ae4bd900b19a9c96f9d38f9723f47c8110f5f77b77c3397aca5fc46c46ac68a",
+  "scope": "pinned prompt-source normalization and exact 5,000-prompt FlashMap corpus publication",
+  "source_revisions": {
+    "HuggingFaceTB/smoltalk": "5feaf2fd3ffca7c237fc38d1861bc30365d48ffa",
+    "bigcode/self-oss-instruct-sc2-exec-filter-50k": "356bb069eee815daa6e23e9a282eeefe1490ad44",
+    "open-r1/OpenR1-Math-220k": "e4e141ec9dea9f8326f4d347be56105859b2bd68"
+  }
+}

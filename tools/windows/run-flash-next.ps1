@@ -20,7 +20,11 @@ param(
   [string]$MtpModel = ""
 )
 $ErrorActionPreference = "Stop"
-$bin = Resolve-Path "$PSScriptRoot\..\..\build\release"
+$root = (Resolve-Path "$PSScriptRoot\..\..").Path
+. (Join-Path $PSScriptRoot "accelerator_runtime.ps1")
+$runtime = Initialize-GufoAcceleratorRuntime -RepositoryRoot $root
+Write-Host "accelerator runtime ready: temp=$($runtime.RuntimeTemp) ollama_stopped=$($runtime.OllamaStopped)"
+$bin = Resolve-Path "$root\build\release"
 
 if (-not $Snapshot) {
   $cache = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE }

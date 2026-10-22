@@ -37,6 +37,15 @@ powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1   # release -> 
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test   # + tests and tools
 ```
 
+HIP and XDNA2 development commands should run through
+`tools\windows\invoke-gufo-accelerator.ps1`. The wrapper stops any Ollama
+processes before ROCm initializes, binds `TEMP`, `TMP`, `TMPDIR`, and
+`GUFO_RUNTIME_TEMP` to `build\gufo-runtime-temp`, and runs the checked-in tiny
+HIP health probe before the requested command. The Flash-Next launcher and the
+routed-vector qualification launcher apply this policy automatically. Ollama
+remains available for manual use, but its per-user Windows Startup shortcut
+should stay disabled on a Gufo development machine.
+
 `build.ps1` imports the MSVC environment, discovers the active wheel toolchain
 (or accepts `-Rocm`), configures with TheRock clang and the vcpkg toolchain,
 builds, and copies the ROCm and vcpkg runtime DLLs plus the

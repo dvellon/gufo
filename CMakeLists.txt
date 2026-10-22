@@ -83,6 +83,15 @@ if (WIN32 AND DEFINED ENV{HIP_PATH})
 endif()
 
 if (ENGINE_ENABLE_HIP)
+  if (WIN32 AND DEFINED ENV{HIP_DEVICE_LIB_PATH}
+      AND NOT CMAKE_HIP_FLAGS MATCHES "--rocm-device-lib-path")
+    # Keep the path out of the PowerShell-to-CMake command line: Windows
+    # PowerShell strips the embedded quotes before CMake can cache them.
+    file(TO_CMAKE_PATH "$ENV{HIP_DEVICE_LIB_PATH}" GUFO_HIP_DEVICE_LIB_PATH)
+    set(CMAKE_HIP_FLAGS
+      "--rocm-device-lib-path=\"${GUFO_HIP_DEVICE_LIB_PATH}\" ${CMAKE_HIP_FLAGS}"
+      CACHE STRING "HIP flags" FORCE)
+  endif()
   if (WIN32 AND NOT CMAKE_HIP_FLAGS MATCHES "compat/win32/hip_include")
     # Before enable_language so CMake's compiler probe gets it too; see the
     # header for the MSVC 14.5x <cmath> conflict it works around.

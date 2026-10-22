@@ -74,6 +74,7 @@ $env:HIP_DEVICE_LIB_PATH = $deviceLibDir.Replace('\', '/')
 $env:PATH = "$Rocm\bin;$compilerDir;$(Split-Path $Ninja);$env:PATH"
 $clang = (Join-Path $compilerDir "clang.exe").Replace('\', '/')
 $clangxx = (Join-Path $compilerDir "clang++.exe").Replace('\', '/')
+$deviceLibFlag = "--rocm-device-lib-path=`"$($env:HIP_DEVICE_LIB_PATH)`""
 $rocmPrefixPath = (@($Rocm) + $RocmDependencyRoots) -join ";"
 
 $build = if ($BuildDir) {
@@ -91,7 +92,7 @@ if (-not (Test-Path "$build\CMakeCache.txt")) {
     "-DCMAKE_CXX_COMPILER=$clangxx" `
     "-DCMAKE_HIP_COMPILER=$clangxx" `
     "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$($Rocm.Replace('\', '/'))" `
-    "-DCMAKE_HIP_FLAGS=--rocm-device-lib-path=$($env:HIP_DEVICE_LIB_PATH)" `
+    "-DCMAKE_HIP_FLAGS=$deviceLibFlag" `
     "-DCMAKE_TOOLCHAIN_FILE=$($Vcpkg.Replace('\', '/'))/scripts/buildsystems/vcpkg.cmake" `
     "-DVCPKG_TARGET_TRIPLET=x64-windows" `
     "-DCMAKE_PREFIX_PATH=$($rocmPrefixPath.Replace('\', '/'))" `

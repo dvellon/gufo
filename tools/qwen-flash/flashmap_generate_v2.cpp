@@ -11,6 +11,11 @@
 #include <memory>
 #include <sstream>
 
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
+
 namespace {
 
 constexpr std::string_view kPackageFormat =
@@ -280,6 +285,61 @@ void MakeReadOnly(const std::filesystem::path& path) {
 #endif
 }
 
+#ifndef _WIN32
+void FsyncDirectory(const std::filesystem::path& path) {
+  const auto directory = path.parent_path().empty() ? std::filesystem::path(".")
+                                                    : path.parent_path();
+  int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+  flags |= O_DIRECTORY;
+#endif
+  const int descriptor = ::open(directory.c_str(), flags);
+  if (descriptor < 0 || ::fsync(descriptor) != 0) {
+    if (descriptor >= 0)
+      ::close(descriptor);
+    throw std::runtime_error("response directory publication flush failed");
+  }
+  ::close(descriptor);
+}
+#endif
+
+void PublishV2NoReplace(const std::filesystem::path& partial,
+                        const std::filesystem::path& output) {
+#ifdef _WIN32
+  PublishNoReplace(partial, output);
+#elif defined(__linux__)
+  if (::syscall(SYS_renameat2, AT_FDCWD, partial.c_str(), AT_FDCWD,
+                output.c_str(), RENAME_NOREPLACE) != 0)
+    throw std::runtime_error("non-overwriting response publication failed");
+  FsyncDirectory(output);
+#else
+  // Non-Linux POSIX retains the portable hard-link publication primitive.
+  // The second directory flush and same-inode startup recovery below close
+  // both crash windows in that fallback without permitting replacement.
+  if (::link(partial.c_str(), output.c_str()) != 0)
+    throw std::runtime_error("non-overwriting response publication failed");
+  FsyncDirectory(output);
+  if (::unlink(partial.c_str()) != 0)
+    throw std::runtime_error("published response but could not unlink partial");
+  FsyncDirectory(output);
+#endif
+}
+
+void RecoverLinkedPublication(const std::filesystem::path& output,
+                              const std::filesystem::path& partial) {
+#ifndef _WIN32
+  if (std::filesystem::exists(output) && std::filesystem::exists(partial) &&
+      std::filesystem::equivalent(output, partial)) {
+    if (!std::filesystem::remove(partial))
+      throw std::runtime_error("linked publication recovery failed");
+    FsyncDirectory(output);
+  }
+#else
+  (void)output;
+  (void)partial;
+#endif
+}
+
 void ValidateCompletion(const std::filesystem::path& output,
                         const std::filesystem::path& receipt,
                         const Shard& shard, const Package& package,
@@ -319,7 +379,7 @@ void SealCompletion(const std::filesystem::path& output, const Shard& shard,
     sink.Close();
   }
   MakeReadOnly(partial);
-  PublishNoReplace(partial, receipt);
+  PublishV2NoReplace(partial, receipt);
   MakeReadOnly(receipt);
   ValidateCompletion(output, receipt, shard, package, manifest_sha256);
 }
@@ -555,8 +615,13 @@ int main(int argc, char** argv) {
       if (std::filesystem::is_symlink(output) ||
           std::filesystem::is_symlink(partial) ||
           std::filesystem::is_symlink(receipt) ||
-          std::filesystem::is_symlink(receipt_partial) ||
-          (std::filesystem::exists(output) && std::filesystem::exists(partial)))
+          std::filesystem::is_symlink(receipt_partial))
+        throw std::runtime_error("response shard state is ambiguous");
+      if (args.resume) {
+        RecoverLinkedPublication(output, partial);
+        RecoverLinkedPublication(receipt, receipt_partial);
+      }
+      if (std::filesystem::exists(output) && std::filesystem::exists(partial))
         throw std::runtime_error("response shard state is ambiguous");
       if ((std::filesystem::exists(receipt) &&
            (!std::filesystem::exists(output) ||
@@ -629,7 +694,7 @@ int main(int argc, char** argv) {
       }
       if (!complete) {
         sink->Close();
-        PublishNoReplace(partial, output);
+        PublishV2NoReplace(partial, output);
       }
       SealCompletion(output, shard, package, args.manifest_sha256);
     }

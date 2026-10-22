@@ -148,19 +148,29 @@ def main() -> int:
         partial.unlink()
 
         receipt = responses / (first["response_file"] + ".complete.json")
+        receipt_unpublished = root / "receipt-unpublished"
+        receipt.chmod(0o600)
+        receipt.rename(receipt_unpublished)
+        state, rows = package.resume_rows(
+            manifest, manifest_path, responses, first
+        )
+        assert state == "repair-required" and len(rows) == 4
+        receipt_unpublished.rename(receipt)
+        receipt.chmod(0o444)
+
         receipt_partial = Path(str(receipt) + ".partial")
         receipt.chmod(0o600)
         receipt.rename(receipt_partial)
-        assert len(package.response_rows(
-            manifest,
-            manifest_path,
-            responses,
-            first,
-            partial=False,
-            completion_partial=True,
-        )) == 4
+        state, rows = package.resume_rows(
+            manifest, manifest_path, responses, first
+        )
+        assert state == "repair-required" and len(rows) == 4
         receipt_partial.rename(receipt)
         receipt.chmod(0o444)
+        state, rows = package.resume_rows(
+            manifest, manifest_path, responses, first
+        )
+        assert state == "sealed" and len(rows) == 4
 
         complete.chmod(0o600)
         expect_failure(lambda: package.response_rows(

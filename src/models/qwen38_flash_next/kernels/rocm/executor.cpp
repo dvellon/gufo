@@ -94,10 +94,23 @@ struct PrefillPhase {
   ~PrefillPhase() { prefill_phase = previous; }
 };
 bool MatrixRows(std::uint32_t rows) {
+#if !GUFO_HIP_HAS_WMMA_WAVE32
+  // The wide-row path is made from gfx1151 wave32 WMMA kernels. CDNA3 uses
+  // the exact-output vector/MMQ and hipBLAS fallbacks until each operation
+  // has an independently qualified wave64 MFMA implementation.
+  (void)rows;
+  return false;
+#else
   return prefill_phase || rows > kVecBatch;
+#endif
 }
 bool ExpertMatrixRows(std::uint32_t rows) {
+#if !GUFO_HIP_HAS_WMMA_WAVE32
+  (void)rows;
+  return false;
+#else
   return prefill_phase || rows > 4 * kVecBatch;
+#endif
 }
 /// Prefill passes wider than a vector batch take the fused projections and
 /// the paired routed expert tiles: they win from 9 rows up to the full chunk.
@@ -965,8 +978,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     AssignError(error_msg, "quantized GEMM tier initialization failed");
     return nullptr;
   }
+#if GUFO_HIP_HAS_WMMA_WAVE32
   if (!Check(PrepareW8A8GemmWave64(), "wide Q8 GEMM preparation", error_msg))
     return nullptr;
+#endif
   // The first greedy verification otherwise resolves the shared argmax
   // module on the decode path. Preparation launches no trial kernels.
   if (e->has_mtp() && !Check(gufo::hip::PrepareBatchedGPUArgmax(),

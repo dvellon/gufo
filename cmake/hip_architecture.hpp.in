@@ -1,0 +1,16 @@
+#pragma once
+
+#include <string_view>
+
+namespace gufo::hip::architecture {
+
+inline constexpr std::string_view kName = "@GUFO_HIP_ARCHITECTURE@";
+inline constexpr std::string_view kFamily = "@GUFO_HIP_ARCHITECTURE_FAMILY@";
+inline constexpr int kWaveSize = @GUFO_HIP_WAVE_SIZE@;
+inline constexpr bool kHasWmmaWave32 = @GUFO_HIP_HAS_WMMA_WAVE32@;
+inline constexpr bool kHasMfmaWave64 = @GUFO_HIP_HAS_MFMA_WAVE64@;
+inline constexpr bool kProductionSupported =
+    @GUFO_HIP_PRODUCTION_SUPPORTED@;
+inline constexpr bool kExperimental = @GUFO_HIP_EXPERIMENTAL@;
+
+}  // namespace gufo::hip::architecture

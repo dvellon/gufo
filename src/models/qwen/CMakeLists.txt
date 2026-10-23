@@ -1,9 +1,5 @@
 target_sources(gufo_core PRIVATE
   ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_layout.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
-  ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/oracles.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/state.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/weights.cpp
@@ -23,14 +19,53 @@ target_sources(gufo_core PRIVATE
    ${PROJECT_SOURCE_DIR}/src/models/qwen/mtp_reference.cpp
    ${PROJECT_SOURCE_DIR}/src/models/qwen/dflash_weights.cpp)
 
+add_library(gufo_qwen_vision_host STATIC
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp)
+target_include_directories(gufo_qwen_vision_host PUBLIC ${PROJECT_SOURCE_DIR})
+target_link_libraries(gufo_qwen_vision_host PUBLIC gufo_image_foundation)
+target_link_libraries(gufo_core PUBLIC gufo_qwen_vision_host)
+
+# Model runtimes opt into these shared HIP services explicitly. Keeping them
+# out of gufo_core prevents a model-scoped build from inheriting every Qwen
+# kernel merely to obtain sampling and hipBLASLt dispatch.
 if (ENGINE_ENABLE_HIP)
+  add_library(gufo_qwen_hip_runtime_support STATIC
+    ${PROJECT_SOURCE_DIR}/src/core/hip/hipblaslt_plan_database.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/sample.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblaslt_gemm.hip)
+  target_include_directories(gufo_qwen_hip_runtime_support PUBLIC
+    ${PROJECT_SOURCE_DIR})
+  target_include_directories(gufo_qwen_hip_runtime_support SYSTEM PRIVATE
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
+  target_compile_definitions(gufo_qwen_hip_runtime_support PUBLIC
+    ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen_hip_runtime_support PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_link_libraries(gufo_qwen_hip_runtime_support PUBLIC
+    gufo_hip_architecture hip::host roc::hipblas roc::hipblaslt)
+  target_link_libraries(gufo_core PUBLIC gufo_qwen_hip_runtime_support)
+
+  add_library(gufo_qwen_vision_hip STATIC
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip)
+  target_include_directories(gufo_qwen_vision_hip PUBLIC ${PROJECT_SOURCE_DIR})
+  target_compile_definitions(gufo_qwen_vision_hip PUBLIC ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen_vision_hip PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_link_libraries(gufo_qwen_vision_hip PUBLIC
+    gufo_qwen_vision_host gufo_qwen_hip_runtime_support
+    gufo_hip_architecture hip::host roc::hipblas roc::hipblaslt)
+  target_link_libraries(gufo_core PUBLIC gufo_qwen_vision_hip)
+endif()
+
+if (ENGINE_ENABLE_HIP AND GUFO_HIP_PRODUCTION_SUPPORTED)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
   target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
   target_sources(gufo_core PRIVATE
     ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_ssm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_embed.hip
@@ -50,7 +85,6 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/residual.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/unpack.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/rope.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/sample.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/norm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/gemv_quant.hip
@@ -68,7 +102,6 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_tile.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_wmma.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblas_gemm.hip
-    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/hipblaslt_gemm.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/dflash_kernels.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/arena.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/batched_decode.cpp
@@ -114,7 +147,7 @@ if (ENGINE_ENABLE_HIP)
     APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
 endif()
 
-if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+if (ENGINE_ENABLE_HIP AND GUFO_HIP_PRODUCTION_SUPPORTED AND GUFO_BUILD_TOOLS)
   add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
     ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
   target_link_libraries(qwen27b_continuation_probe PRIVATE gufo_core)

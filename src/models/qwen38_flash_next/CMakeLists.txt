@@ -1,18 +1,20 @@
-# Qwen3.8-Flash-Next (qwen4exp) model package. The scalar oracle is built
-# only by explicit validation targets, not by production or routine checks.
-add_library(gufo_qwen38_flash_next STATIC
+# Qwen3.8-Flash-Next (qwen4exp) host model package. Configuration, weights,
+# continuation geometry, and n-gram metadata remain accelerator-independent.
+add_library(gufo_qwen38_flash_next_host STATIC
   config.cpp
   continuation_layout.cpp
   ngram.cpp
   weights.cpp)
 
-target_include_directories(gufo_qwen38_flash_next PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(gufo_qwen38_flash_next PUBLIC gufo_core Threads::Threads)
+target_include_directories(gufo_qwen38_flash_next_host PUBLIC
+  ${PROJECT_SOURCE_DIR})
+target_link_libraries(gufo_qwen38_flash_next_host PUBLIC
+  gufo_model_foundation Threads::Threads)
 
 add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
   cpu_ops.cpp reference.cpp)
 target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
-  gufo_qwen38_flash_next)
+  gufo_qwen38_flash_next_host)
 
 # The reference decodes every weight on the fly; unoptimized it is unusable
 # even as an oracle, so it keeps -O2 in every configuration.
@@ -20,6 +22,14 @@ set_source_files_properties(cpu_ops.cpp reference.cpp
   PROPERTIES COMPILE_OPTIONS "-O2")
 
 if (ENGINE_ENABLE_HIP)
+  add_library(gufo_qwen38_flash_next STATIC engine.cpp)
+  target_include_directories(gufo_qwen38_flash_next PUBLIC
+    ${PROJECT_SOURCE_DIR})
+  target_link_libraries(gufo_qwen38_flash_next PUBLIC
+    gufo_qwen38_flash_next_host gufo_qwen_tokenization gufo_qwen_vision_host
+    gufo_hip_model_support
+    gufo_hip_architecture Threads::Threads)
+
   set(QFN_ROCM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/kernels/rocm")
   set(QFN_MMQ_DIR "${QFN_ROCM_DIR}/mmq")
 
@@ -46,7 +56,8 @@ if (ENGINE_ENABLE_HIP)
   target_compile_options(gufo_qwen38_flash_next_mmq PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-g0;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
-  target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
+  target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC
+    gufo_hip_architecture hip::host roc::hipblas)
 
   set(QFN_HIP_SOURCES
     continuation_adapter.cpp
@@ -55,8 +66,7 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
     ${QFN_ROCM_DIR}/executor.cpp
-    ${QFN_ROCM_DIR}/batch.cpp
-    engine.cpp)
+    ${QFN_ROCM_DIR}/batch.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
@@ -71,7 +81,17 @@ if (ENGINE_ENABLE_HIP)
     ${ROCWMMA_INCLUDE_DIR})
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
     gufo_cache_hip
+    gufo_qwen_hip_runtime_support
+    gufo_qwen_vision_hip
     gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
+
+  if (NOT GUFO_HIP_PRODUCTION_SUPPORTED)
+    get_target_property(_qfn_runtime_links gufo_qwen38_flash_next LINK_LIBRARIES)
+    if ("gufo_core" IN_LIST _qfn_runtime_links)
+      message(FATAL_ERROR
+        "The experimental Qwen3.8 FlashMap target must not link gufo_core")
+    endif()
+  endif()
 
   if (GUFO_BUILD_TOOLS AND NOT BUILD_TESTING)
     add_executable(qwen38_flash_next_continuation_probe EXCLUDE_FROM_ALL
@@ -96,4 +116,9 @@ if (ENGINE_ENABLE_HIP)
     target_link_libraries(qwen38_flash_next_flashmap_generate_v2 PRIVATE
       gufo_qwen38_flash_next)
   endif()
+else()
+  # Preserve the established target name for host-only tests and consumers.
+  add_library(gufo_qwen38_flash_next INTERFACE)
+  target_link_libraries(gufo_qwen38_flash_next INTERFACE
+    gufo_qwen38_flash_next_host gufo_qwen_tokenization)
 endif()

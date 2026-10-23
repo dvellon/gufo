@@ -2,7 +2,7 @@ add_library(gufo_qwen_image_21 STATIC image.cpp weights.cpp tokenizer.cpp)
 target_include_directories(gufo_qwen_image_21 PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen_image_21 PUBLIC gufo_core ICU::i18n)
 
-if(ENGINE_ENABLE_HIP)
+if(ENGINE_ENABLE_HIP AND GUFO_HIP_PRODUCTION_SUPPORTED)
   target_sources(gufo_qwen_image_21 PRIVATE
     hip/kernels.hip hip/attention.hip hip/dense.hip hip/convolution.hip
     hip/pipeline.cpp hip/blas.cpp)
@@ -25,7 +25,7 @@ function(gufo_qwen_image_21_register_tests)
   target_link_libraries(qwen_image_21_test PRIVATE gufo_qwen_image_21 gufo_http)
   add_test(NAME qwen_image_21_test COMMAND qwen_image_21_test)
   set_tests_properties(qwen_image_21_test PROPERTIES LABELS "cpu;models;qwen-image")
-  if(ENGINE_ENABLE_HIP)
+  if(ENGINE_ENABLE_HIP AND GUFO_HIP_PRODUCTION_SUPPORTED)
     add_executable(qwen_image_21_kernel_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
     target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21)

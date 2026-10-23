@@ -137,6 +137,7 @@ __launch_bounds__(32, 1) static __global__
 // Integer matrix products reuse each Q8 weight across up to 48 inputs.
 // Keep four separate K8 sums per wave: merging them into a K32 integer sum
 // would change the scalar kernel's rounded products, FMA chain and reduction.
+#if GUFO_HIP_HAS_WMMA_WAVE32
 template<int token_tiles, bool ragged, bool grouped = false>
 __launch_bounds__(256) static __global__ void mul_mat_q8_decode_batch(
     const block_q8_0* __restrict__ weights,
@@ -223,6 +224,7 @@ __launch_bounds__(256) static __global__ void mul_mat_q8_decode_batch(
     __syncthreads();
   }
 }
+#endif
 
 typedef float (*vec_dot_q_hip_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
@@ -666,6 +668,7 @@ static void launch_q8_batch(const void* weights, const block_q8_1* input,
   }
 }
 
+#if GUFO_HIP_HAS_WMMA_WAVE32
 template<int token_tiles>
 static void launch_q8_matrix(const void* weights, const block_q8_1* input,
                              float* output, int k, int rows, int tokens,
@@ -681,6 +684,7 @@ static void launch_q8_matrix(const void* weights, const block_q8_1* input,
             static_cast<const block_q8_0*>(weights), input, output, k, rows,
             input_stride, tokens);
 }
+#endif
 
 int prepare_q8_decode() {
   hipFuncAttributes attributes{};
@@ -696,6 +700,7 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                              const block_q8_1* input, float* output, int k,
                              int rows, int tokens, int input_stride,
                              hipStream_t stream) {
+#if GUFO_HIP_HAS_WMMA_WAVE32
   const bool matrix_shape =
       (k == 2560 && rows >= 1024) || (k == 320 && rows == 10240);
   if (!gate && matrix_shape && tokens > 48 && tokens % 32 == 0) {
@@ -719,6 +724,7 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                            stream);
     return;
   }
+#endif
   GGML_ASSERT(k % QK8_0 == 0 && rows > 0);
   if (tokens > 8) {
     GGML_ASSERT(tokens <= 32 && !gate);

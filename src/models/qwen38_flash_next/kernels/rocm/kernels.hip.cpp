@@ -48,7 +48,7 @@ __device__ __forceinline__ float Materialize(float v) {
 /// (ds_bpermute). Only the transport differs, so reductions stay bitwise;
 /// every lane must be active, as the shuffle's callers already require.
 __device__ __forceinline__ int XorLane(int v, int offset) {
-#if defined(__gfx1151__)
+#if defined(GUFO_HIP_ARCH_gfx1151)
   switch (offset) {
     case 1:
       return __builtin_amdgcn_update_dpp(0, v, 0x161, 0xF, 0xF, false);
@@ -62,6 +62,14 @@ __device__ __forceinline__ int XorLane(int v, int offset) {
       return __builtin_amdgcn_permlanex16(v, v, 0x76543210, 0xfedcba98, false,
                                           false);
   }
+#elif defined(GUFO_HIP_ARCH_gfx942)
+  // ROCm 10.1 incorrectly selects gfx10 ROW_XMASK DPP encodings for some
+  // constant __shfl_xor calls on gfx942. Select CDNA3's LDS crossbar
+  // explicitly; the requested peer remains within the caller's 32-lane
+  // reduction group even though the physical wave is 64 lanes.
+  const unsigned lane = __builtin_amdgcn_mbcnt_hi(
+      ~0U, __builtin_amdgcn_mbcnt_lo(~0U, 0U));
+  return __builtin_amdgcn_ds_bpermute((lane ^ offset) << 2, v);
 #endif
   return __shfl_xor(v, offset);
 }
@@ -1606,9 +1614,7 @@ __global__ void GdnPrepAbKernel(const float* alpha_beta, const float* a,
 
 template<int kMask>
 __device__ __forceinline__ float GdnXorAddDpp(float x) {
-  const int y = __builtin_amdgcn_update_dpp(0, __builtin_bit_cast(int, x),
-                                            0x160 | kMask, 0xF, 0xF, false);
-  return x + __builtin_bit_cast(float, y);
+  return x + XorLane(x, kMask);
 }
 
 __device__ __forceinline__ void GdnRowReduce(float& u, float& p) {
@@ -2491,15 +2497,31 @@ using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
+#if GUFO_HIP_HAS_WMMA_WAVE32
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+#else
+  // CDNA3 dispatch never launches the wave32-only kernels containing this
+  // helper. Keeping their definitions parseable lets the architecture target
+  // share the surrounding exact-output kernels without pretending WMMA is a
+  // CDNA3 capability.
+  (void)a;
+  (void)b;
+  return c;
+#endif
 }
 
 // BF16 fragments carry the same sixteen 16-bit lanes.
 using v16bf = __attribute__((ext_vector_type(16))) __bf16;
 
 __device__ __forceinline__ v8f WmmaBf16(v16h a, v16h b, v8f c) {
+#if GUFO_HIP_HAS_WMMA_WAVE32
   return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
       __builtin_bit_cast(v16bf, a), __builtin_bit_cast(v16bf, b), c);
+#else
+  (void)a;
+  (void)b;
+  return c;
+#endif
 }
 
 // Keep indexer queries in F32: narrowing them before ranking can swap blocks
@@ -4609,7 +4631,13 @@ using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
 
 __device__ __forceinline__ int32x8_t WmmaI8(int32x4_t a, int32x4_t b,
                                             int32x8_t c) {
+#if GUFO_HIP_HAS_WMMA_WAVE32
   return __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a, true, b, c, true);
+#else
+  (void)a;
+  (void)b;
+  return c;
+#endif
 }
 
 /// Four elements per lane, eight lanes per 32-wide K block, four blocks per
@@ -6110,7 +6138,21 @@ __launch_bounds__(256) __global__ void W8A8TailKernel(
       int c = 0;
 #pragma unroll
       for (int q = 0; q < 8; ++q) {
+#if defined(GUFO_HIP_ARCH_gfx942)
+        // gfx942 does not expose the scalar dot8 instruction used on gfx1151.
+        // Preserve the signed byte arithmetic for the narrow tail instead of
+        // silently changing quantization or accumulation order.
+        const auto qa = static_cast<std::uint32_t>(qs[q]);
+        const auto xa = static_cast<std::uint32_t>(xs[q]);
+#pragma unroll
+        for (int byte = 0; byte < 4; ++byte) {
+          const auto qv = static_cast<std::int8_t>(qa >> (8 * byte));
+          const auto xv = static_cast<std::int8_t>(xa >> (8 * byte));
+          c += static_cast<int>(qv) * static_cast<int>(xv);
+        }
+#else
         c = __builtin_amdgcn_sudot4(true, qs[q], true, xs[q], c, false);
+#endif
       }
       const float dx = *reinterpret_cast<const float*>(
           tile + kQ8ActScaleOffset + (tl * sizeof(float)));

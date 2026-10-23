@@ -76,7 +76,8 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `ENGINE_ENABLE_HIP` | `ON` | Build the gfx1151 HIP backend; only `gfx1151` is accepted |
+| `ENGINE_ENABLE_HIP` | `ON` | Build a HIP backend |
+| `GUFO_EXPERIMENTAL_GFX942_FLASHMAP` | `OFF` | Opt into the model-scoped, unqualified gfx942 Qwen3.8 FlashMap build |
 | `BUILD_TESTING` | `OFF` | Build correctness tests |
 | `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |

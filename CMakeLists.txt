@@ -69,10 +69,14 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
   "FFprobe executable used to validate generated media")
 
 # CPU-only builds exist for host checks; production targets gfx1151 only.
-option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
+option(ENGINE_ENABLE_HIP "Build the HIP backend" ON)
+option(GUFO_EXPERIMENTAL_GFX942_FLASHMAP
+  "Build only the unqualified gfx942 FlashMap backend" OFF)
 set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
-if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
-  message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
+include(cmake/GufoHipArchitecture.cmake)
+if (ENGINE_ENABLE_HIP)
+  gufo_resolve_hip_architecture(
+    "${CMAKE_HIP_ARCHITECTURES}" "${GUFO_EXPERIMENTAL_GFX942_FLASHMAP}")
 endif()
 # Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH.
 if (EXISTS /opt/rocm)
@@ -112,12 +116,29 @@ if (ENGINE_ENABLE_HIP)
       $<$<COMPILE_LANGUAGE:HIP>:${CMAKE_SOURCE_DIR}/compat/win32/rocprim_clang21_compat.hpp>)
     message(STATUS "gufo: rocPRIM future-processor compatibility for Clang ${CMAKE_HIP_COMPILER_VERSION}")
   endif()
-  message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/gufo/hip")
+  configure_file(cmake/hip_architecture.hpp.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/gufo/hip/architecture.hpp" @ONLY)
+  add_library(gufo_hip_architecture INTERFACE)
+  target_include_directories(gufo_hip_architecture INTERFACE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  target_compile_definitions(gufo_hip_architecture INTERFACE
+    GUFO_HIP_ARCH_${GUFO_HIP_ARCHITECTURE}=1
+    GUFO_HIP_WAVE_SIZE=${GUFO_HIP_WAVE_SIZE}
+    GUFO_HIP_HAS_WMMA_WAVE32=${GUFO_HIP_HAS_WMMA_WAVE32}
+    GUFO_HIP_HAS_MFMA_WAVE64=${GUFO_HIP_HAS_MFMA_WAVE64})
+  message(STATUS
+    "gufo: HIP target ${GUFO_HIP_ARCHITECTURE} (${GUFO_HIP_ARCHITECTURE_FAMILY}, wave${GUFO_HIP_WAVE_SIZE})")
 endif()
 
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(src/models/deepseek_v4_flash)
 endif()
+
+# Host model primitives are independent of the accelerator backend. Keep them
+# available to portable identity, tokenizer, and dataset tooling.
+add_subdirectory(src/core/model_foundation)
+add_subdirectory(src/models/qwen/tokenization)
 
 # Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
 add_subdirectory(src/models/qwen38_flash_next)
@@ -147,7 +168,7 @@ add_subdirectory(src/cache)
 
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
-  target_link_libraries(gufo_hip_host PUBLIC hip::host)
+  target_link_libraries(gufo_hip_host PUBLIC gufo_hip_architecture hip::host)
   target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
@@ -192,14 +213,6 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_library(gufo_core STATIC
-  src/core/image.cpp
-  src/core/crypto/sha256.cpp
-  src/core/gguf_reader.cpp
-  src/core/gguf_identity.cpp
-  src/core/json_constraint.cpp
-  src/core/json_schema_lexeme.cpp
-  src/core/json_schema_regex.cpp
-  src/core/sampling.cpp
   src/models/minimax_h3/audio_vae.cpp
   src/models/minimax_h3/denoiser.cpp
   src/models/minimax_h3/dit.cpp
@@ -216,15 +229,14 @@ add_library(gufo_core STATIC
   src/eval/dataset.cpp
   src/eval/extract.cpp
   src/eval/regrade.cpp
-  src/core/hip/hipblaslt_plan_database.cpp
-  src/core/quant/ggml_dequant.cpp
   src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
   GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
   GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
-target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
+target_link_libraries(gufo_core PUBLIC gufo_model_foundation
+  gufo_qwen_tokenization ICU::uc ICU::i18n Threads::Threads
   PNG::PNG JPEG::JPEG ${GUFO_WEBP_TARGET} CURL::libcurl OpenSSL::Crypto)
 
 add_subdirectory(src/models/qwen)
@@ -241,22 +253,29 @@ if (OpenMP_CXX_FOUND)
 endif()
 
 if (ENGINE_ENABLE_HIP)
-  set_property(SOURCE src/models/minimax_h3/dit.hip
-    APPEND PROPERTY COMPILE_OPTIONS -O2)
-  target_sources(gufo_core PRIVATE
-    src/models/minimax_h3/audio_vae.hip
-    src/models/minimax_h3/denoiser.hip
-    src/models/minimax_h3/dit.hip
-    src/models/minimax_h3/dense.hip
-    src/models/minimax_h3/runtime_hip.cpp
-    src/models/minimax_h3/prompt_encoder.hip
-    src/models/minimax_h3/sampling.hip
-    src/models/minimax_h3/video_vae.hip
-    src/models/minimax_h3/attention.hip
+  add_library(gufo_hip_model_support STATIC
     src/core/hip/snapshot_copy.hip
-    src/core/hip/weight_upload.cpp
-    src/core/speculative/speculative_verifier.cpp
-  )
+    src/core/hip/weight_upload.cpp)
+  target_include_directories(gufo_hip_model_support PUBLIC ${PROJECT_SOURCE_DIR})
+  target_compile_definitions(gufo_hip_model_support PUBLIC ENGINE_ENABLE_HIP=1)
+  target_link_libraries(gufo_hip_model_support PUBLIC
+    gufo_hip_architecture gufo_model_foundation hip::host)
+  target_link_libraries(gufo_core PUBLIC gufo_hip_model_support)
+  if (GUFO_HIP_PRODUCTION_SUPPORTED)
+    set_property(SOURCE src/models/minimax_h3/dit.hip
+      APPEND PROPERTY COMPILE_OPTIONS -O2)
+    target_sources(gufo_core PRIVATE
+      src/models/minimax_h3/audio_vae.hip
+      src/models/minimax_h3/denoiser.hip
+      src/models/minimax_h3/dit.hip
+      src/models/minimax_h3/dense.hip
+      src/models/minimax_h3/runtime_hip.cpp
+      src/models/minimax_h3/prompt_encoder.hip
+      src/models/minimax_h3/sampling.hip
+      src/models/minimax_h3/video_vae.hip
+      src/models/minimax_h3/attention.hip
+      src/core/speculative/speculative_verifier.cpp)
+  endif()
   if (WIN32)
     target_sources(gufo_core PRIVATE src/core/platform/device_memory.cpp)
     target_link_libraries(gufo_core PUBLIC dxgi)
@@ -417,6 +436,36 @@ include(CTest)
 if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  add_test(NAME hip_architecture_gfx1151_contract
+    COMMAND ${CMAKE_COMMAND}
+      -DTEST_ARCHITECTURE=gfx1151
+      -DTEST_ALLOW_GFX942=OFF
+      -DEXPECT_NAME=gfx1151
+      -DEXPECT_FAMILY=strix-halo
+      -DEXPECT_WAVE_SIZE=32
+      -DEXPECT_WMMA_WAVE32=1
+      -DEXPECT_MFMA_WAVE64=0
+      -DEXPECT_PRODUCTION=1
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/hip_architecture_contract.cmake)
+  add_test(NAME hip_architecture_gfx942_contract
+    COMMAND ${CMAKE_COMMAND}
+      -DTEST_ARCHITECTURE=gfx942
+      -DTEST_ALLOW_GFX942=ON
+      -DEXPECT_NAME=gfx942
+      -DEXPECT_FAMILY=cdna3
+      -DEXPECT_WAVE_SIZE=64
+      -DEXPECT_WMMA_WAVE32=0
+      -DEXPECT_MFMA_WAVE64=1
+      -DEXPECT_PRODUCTION=0
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/hip_architecture_contract.cmake)
+  add_test(NAME hip_architecture_gfx942_requires_opt_in
+    COMMAND ${CMAKE_COMMAND}
+      -DTEST_ARCHITECTURE=gfx942
+      -DTEST_ALLOW_GFX942=OFF
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/hip_architecture_contract.cmake)
+  set_tests_properties(hip_architecture_gfx942_requires_opt_in
+    PROPERTIES WILL_FAIL TRUE)
 
   add_subdirectory(tests/cache)
 
